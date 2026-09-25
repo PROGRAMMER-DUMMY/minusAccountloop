@@ -189,8 +189,17 @@ tests\unit\test_keyring_manager.py ...              [100%]
   `%USERPROFILE%\.gemini\account_pool_state.json`
 * Active credentials live in Windows Credential Manager under the target: `gemini:antigravity`.
 
-#### Q: Does switching accounts reload the editor or close my terminals?
-* **No.** Version 2.0.0 uses native Windows Credential Manager switching (`advapi32.dll: CredWriteW`). Credential swaps complete in `<50ms` without killing `Code.exe` or closing terminal windows.
+#### Q: Why doesn't `/usage` update or switch accounts dynamically mid-session?
+* **Architecture Invariant:** When `agy.exe` (the compiled Go binary) boots, it initializes its internal authentication provider (`b.codeAssistClient.AuthProvider = b.cliAuth`) into process heap memory **once** from Windows Credential Manager.
+* During an active interactive session, `agy.exe` holds an open HTTP/2 SSE streaming socket tied to that specific session ID and Google OAuth identity. It never re-reads the Windows Keyring mid-flight.
+* Querying `/usage` checks Google's API using that active in-memory token.
+* Attempting to mutate credentials mid-stream from an external process would cause HTTP/2 socket desynchronization, 403 authorization rejects, hanging block cursors (`█`), and DOM scroll locks. The Go process boundary **is** the safe credential boundary.
 
-#### Q: How does quota auto-rotation work?
-* Google AI Pro models track usage on rolling cooldowns. When an account hits `RESOURCE_EXHAUSTED (code 429)`, Minus Account Loop tags a 5-hour cooldown on that account and automatically routes future sessions to accounts that have available quota.
+#### Q: How do I seamlessly continue when quota runs out? (1-Key Auto-Resume)
+* If your quota exhausts during an active session, simply type `/exit` (or press `Ctrl+C`).
+* Minus Account Loop's launcher catches the quota event via `try...finally`, parses the exact reset duration, marks the exhausted account in cooldown, selects the next fresh account, and pre-emptively updates Windows Credential Manager in `<50ms`.
+* **If you exited via `/exit`:** The launcher automatically detects the session and prompts:
+  `[MinusAccountLoop] 🚀 Auto-resume ready for conversation <id> on <new-account>. Press [ENTER] to resume immediately (or wait 3s)...`
+  It launches straight back into your conversation with 100% fresh quota!
+* **If you exited via `Ctrl+C`:** Simply type `agy -c` (or Up Arrow + Enter) to immediately resume on the rotated account.
+

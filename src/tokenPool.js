@@ -235,10 +235,18 @@ function getAccountPoolStatus(baseDataPath, savedProfileNames = []) {
 
     return allAccounts.map(account => {
         const key = account.trim().toLowerCase();
-        const entry = poolState[key] || poolState[account] || { lastExhausted: 0, switchCount: 0 };
+        const entry = poolState[key] || poolState[account] || { lastExhausted: 0, switchCount: 0, cooldownUntil: 0 };
         const elapsed = now - entry.lastExhausted;
-        const inCooldown = entry.lastExhausted > 0 && elapsed < QUOTA_COOLDOWN_MS;
-        const remainingMin = inCooldown ? Math.ceil((QUOTA_COOLDOWN_MS - elapsed) / 60000) : 0;
+        
+        let inCooldown = false;
+        let remainingMin = 0;
+        if (entry.cooldownUntil && entry.cooldownUntil > 0) {
+            inCooldown = now < entry.cooldownUntil;
+            remainingMin = inCooldown ? Math.ceil((entry.cooldownUntil - now) / 60000) : 0;
+        } else if (entry.lastExhausted > 0 && elapsed < QUOTA_COOLDOWN_MS) {
+            inCooldown = true;
+            remainingMin = Math.ceil((QUOTA_COOLDOWN_MS - elapsed) / 60000);
+        }
 
         return {
             account,
@@ -255,13 +263,18 @@ function getAccountPoolStatus(baseDataPath, savedProfileNames = []) {
  *
  * @param {string} [baseDataPath]
  * @param {string} [accountName]
+ * @param {number} [cooldownMs]
  */
-function recordExhaustion(baseDataPath, accountName) {
+function recordExhaustion(baseDataPath, accountName, cooldownMs = null) {
     if (!accountName) return;
     const poolState = loadPoolState(baseDataPath);
     const key = accountName.trim().toLowerCase();
-    const current = poolState[key] || poolState[accountName] || { lastExhausted: 0, switchCount: 0 };
-    current.lastExhausted = Date.now();
+    const current = poolState[key] || poolState[accountName] || { lastExhausted: 0, switchCount: 0, cooldownUntil: 0 };
+    const now = Date.now();
+    current.lastExhausted = now;
+    if (cooldownMs && typeof cooldownMs === 'number' && cooldownMs > 0) {
+        current.cooldownUntil = now + cooldownMs;
+    }
     current.switchCount = (current.switchCount || 0) + 1;
     poolState[key] = current;
     savePoolState(baseDataPath, poolState);

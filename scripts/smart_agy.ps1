@@ -16,7 +16,7 @@ $logPath = "$env:USERPROFILE\.gemini\antigravity-cli\cli.log"
 $wincredScript = Join-Path $PSScriptRoot "wincred.ps1"
 $agyExe = "$env:LOCALAPPDATA\agy\bin\agy.exe"
 
-$cooldownMs = 5 * 3600 * 1000  # 5 hours
+$cooldownMs = 6 * 3600 * 1000  # Default 6 hours fallback
 $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
 # 1. Clean orphaned zombie agy processes across the machine
@@ -40,15 +40,20 @@ if ($availableProfiles.Count -eq 0) {
     exit $LASTEXITCODE
 }
 
-# 3. Load account pool state (lastExhausted and switchCount)
+# 3. Load account pool state (lastExhausted, cooldownUntil, and switchCount)
 $poolState = @{}
 if (Test-Path $poolFile) {
     try {
         $pJson = Get-Content $poolFile -Raw | ConvertFrom-Json
         foreach ($prop in $pJson.PSObject.Properties) {
+            $cu = 0
+            if ($prop.Value.PSObject.Properties.Match('cooldownUntil').Count -gt 0) {
+                $cu = [long]$prop.Value.cooldownUntil
+            }
             $poolState[$prop.Name.ToLower()] = @{
                 lastExhausted = [long]$prop.Value.lastExhausted
                 switchCount = [int]$prop.Value.switchCount
+                cooldownUntil = $cu
             }
         }
     } catch {}
@@ -59,10 +64,14 @@ function Save-PoolState {
     try {
         $obj = [ordered]@{}
         foreach ($k in $poolState.Keys) {
-            $obj[$k] = @{
+            $h = [ordered]@{
                 lastExhausted = [long]$poolState[$k].lastExhausted
                 switchCount = [int]$poolState[$k].switchCount
             }
+            if ($poolState[$k].ContainsKey('cooldownUntil') -and $poolState[$k].cooldownUntil -gt 0) {
+                $h['cooldownUntil'] = [long]$poolState[$k].cooldownUntil
+            }
+            $obj[$k] = $h
         }
         $obj | ConvertTo-Json -Depth 3 | Set-Content $poolFile -Encoding utf8
     } catch {}
@@ -74,7 +83,11 @@ function Is-AccountInCooldown($email) {
     $k = $email.ToLower()
     if ($poolState.ContainsKey($k)) {
         $entry = $poolState[$k]
-        if ($entry.lastExhausted -gt 0) {
+        if ($entry.ContainsKey('cooldownUntil') -and $entry.cooldownUntil -gt 0) {
+            if ($nowMs -lt $entry.cooldownUntil) {
+                return $true
+            }
+        } elseif ($entry.lastExhausted -gt 0) {
             $elapsed = $nowMs - $entry.lastExhausted
             if ($elapsed -gt 0 -and $elapsed -lt $cooldownMs) {
                 return $true
@@ -89,7 +102,11 @@ function Get-CooldownRemainingMin($email) {
     $k = $email.ToLower()
     if ($poolState.ContainsKey($k)) {
         $entry = $poolState[$k]
-        if ($entry.lastExhausted -gt 0) {
+        if ($entry.ContainsKey('cooldownUntil') -and $entry.cooldownUntil -gt 0) {
+            if ($nowMs -lt $entry.cooldownUntil) {
+                return [Math]::Ceiling(($entry.cooldownUntil - $nowMs) / 60000)
+            }
+        } elseif ($entry.lastExhausted -gt 0) {
             $elapsed = $nowMs - $entry.lastExhausted
             if ($elapsed -gt 0 -and $elapsed -lt $cooldownMs) {
                 return [Math]::Ceiling(($cooldownMs - $elapsed) / 60000)
@@ -347,42 +364,131 @@ if (Test-Path $logPath) {
     } catch {}
 }
 
-# 12. Execute genuine agy with all arguments
-& $agyExe @filteredArgs
-$exitCode = $LASTEXITCODE
+$exhaustionDetected = $false
+$rotatedToAccount = $null
+$exitCode = 0
 
-# 13. Post-execution: Inspect newly appended log lines for genuine RESOURCE_EXHAUSTED
-if (Test-Path $logPath) {
-    try {
-        $finalItem = Get-Item $logPath
-        if ($finalItem.Length -gt $initialLogSize) {
-            $readBytes = [Math]::Min($finalItem.Length - $initialLogSize, 32768)
-            $stream = [System.IO.File]::OpenRead($logPath)
-            $stream.Seek($finalItem.Length - $readBytes, [System.IO.SeekOrigin]::Begin) | Out-Null
-            $buffer = New-Object byte[] $readBytes
-            $stream.Read($buffer, 0, $readBytes) | Out-Null
-            $stream.Close()
-            $newText = [System.Text.Encoding]::UTF8.GetString($buffer)
+try {
+    # 12. Execute genuine agy with all arguments
+    & $agyExe @filteredArgs
+    $exitCode = $LASTEXITCODE
+} finally {
+    # 13. Post-execution: Inspect newly appended log lines for genuine RESOURCE_EXHAUSTED
+    if (Test-Path $logPath) {
+        try {
+            $finalItem = Get-Item $logPath
+            if ($finalItem.Length -gt $initialLogSize) {
+                $readBytes = [Math]::Min($finalItem.Length - $initialLogSize, 65536)
+                $stream = [System.IO.File]::OpenRead($logPath)
+                $stream.Seek($finalItem.Length - $readBytes, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $buffer = New-Object byte[] $readBytes
+                $stream.Read($buffer, 0, $readBytes) | Out-Null
+                $stream.Close()
+                $newText = [System.Text.Encoding]::UTF8.GetString($buffer)
 
-            # Strict quota check matching tokenPool.js
-            if ($newText -match '\b(RESOURCE_EXHAUSTED|quota exceeded|individual quota reached|rate limit exceeded)\b|\b(code|status)\s*[:=]?\s*429\b') {
-                $nowExMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-                $kTarget = $targetEmail.ToLower()
-                if (-not $poolState.ContainsKey($kTarget)) {
-                    $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0 }
+                # Strict quota check matching tokenPool.js
+                if ($newText -match '\b(RESOURCE_EXHAUSTED|quota exceeded|individual quota reached|rate limit exceeded)\b|\b(code|status)\s*[:=]?\s*429\b') {
+                    $exhaustionDetected = $true
+                    $nowExMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                    $kTarget = $targetEmail.ToLower()
+                    if (-not $poolState.ContainsKey($kTarget)) {
+                        $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0 }
+                    }
+
+                    # Parse reset duration if provided by Google (e.g. "Resets in 65h41m56s" or "Resets in 2h")
+                    $parsedCooldownMs = $cooldownMs
+                    if ($newText -match 'Resets in\s+(\d+)h(?:(\d+)m)?') {
+                        $rHours = [int]$Matches[1]
+                        $rMins = if ($Matches[2]) { [int]$Matches[2] } else { 0 }
+                        $parsedCooldownMs = ($rHours * 3600 + $rMins * 60) * 1000
+                    }
+
+                    $poolState[$kTarget].lastExhausted = $nowExMs
+                    $poolState[$kTarget].cooldownUntil = $nowExMs + $parsedCooldownMs
+                    $poolState[$kTarget].switchCount = [int]$poolState[$kTarget].switchCount + 1
+                    Save-PoolState
+
+                    $nextAcc = Get-BestAvailableAccount $targetEmail
+                    $mappings[$currentDir] = $nextAcc
+                    Save-Mappings
+                    $rotatedToAccount = $nextAcc
+
+                    # Pre-emptively switch Windows Keyring so next invocation is INSTANT (<50ms)
+                    $nextProfilePath = Join-Path $profilesDir "$nextAcc.json"
+                    if (Test-Path $nextProfilePath) {
+                        try {
+                            $npData = Get-Content $nextProfilePath -Raw | ConvertFrom-Json
+                            $blob = $npData.credentialBlob
+                            if ($blob -isnot [string]) {
+                                $blob = $blob | ConvertTo-Json -Compress -Depth 10
+                            }
+                            $tmpF = [System.IO.Path]::GetTempFileName()
+                            [System.IO.File]::WriteAllText($tmpF, $blob, [System.Text.Encoding]::UTF8)
+                            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wincredScript -Action write -Target "gemini:antigravity" -UserName "antigravity" -SecretFile $tmpF | Out-Null
+                            Remove-Item $tmpF -Force -ErrorAction SilentlyContinue
+                        } catch {}
+                    }
+
+                    $resetHoursDisplay = [Math]::Round($parsedCooldownMs / 3600000, 1)
+                    Write-Host "`n[MinusAccountLoop] ⚠️ Quota exhausted on $targetEmail during this session." -ForegroundColor Yellow
+                    Write-Host "[MinusAccountLoop] ⏱️ Quota cooldown registered for ~$resetHoursDisplay hours." -ForegroundColor Yellow
+                    Write-Host "[MinusAccountLoop] ✅ Workspace auto-rotated to fresh account: $nextAcc" -ForegroundColor Green
+                    Write-Host "[MinusAccountLoop] 🔑 Windows Keyring updated to: $nextAcc" -ForegroundColor Cyan
+                    Write-Host "[MinusAccountLoop] 💡 Ready: Run 'agy -c' to resume this exact conversation with 100% quota!`n" -ForegroundColor Green
                 }
-                $poolState[$kTarget].lastExhausted = $nowExMs
-                $poolState[$kTarget].switchCount = [int]$poolState[$kTarget].switchCount + 1
-                Save-PoolState
-
-                $nextAcc = Get-BestAvailableAccount $targetEmail
-                $mappings[$currentDir] = $nextAcc
-                Save-Mappings
-                Write-Host "`n[MinusAccountLoop] Quota exhausted on $targetEmail during this session." -ForegroundColor Yellow
-                Write-Host "[MinusAccountLoop] Workspace auto-rotated to fresh account: $nextAcc (Next 'agy' command will run with full quota)`n" -ForegroundColor Green
             }
+        } catch {}
+    }
+}
+
+# 14. 1-Key Auto-Resume prompt if process exited cleanly after exhaustion
+if ($exhaustionDetected -and $rotatedToAccount -and $exitCode -eq 0) {
+    $resumeConvId = $null
+    $histPath = "$env:USERPROFILE\.gemini\antigravity-cli\history.jsonl"
+    if (Test-Path $histPath) {
+        $targetPath = $PWD.Path.TrimEnd('\/').ToLower()
+        $entry = Get-Content $histPath | ForEach-Object { try { ConvertFrom-Json $_ } catch {} } |
+            Where-Object { $_.workspace -and $_.conversationId -and ($_.workspace.TrimEnd('\/').ToLower() -eq $targetPath) } |
+            Select-Object -Last 1
+        if ($entry -and $entry.conversationId) {
+            $resumeConvId = $entry.conversationId
         }
-    } catch {}
+    }
+
+    if ($resumeConvId) {
+        Write-Host "[MinusAccountLoop] 🚀 Auto-resume ready for conversation $resumeConvId on $rotatedToAccount." -ForegroundColor Green
+        Write-Host "Press [ENTER] to auto-resume immediately (or wait 3s, or [Q] to stay in terminal): " -NoNewline -ForegroundColor Cyan
+
+        $autoResume = $true
+        $timeout = 3 # seconds
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($stopwatch.Elapsed.TotalSeconds -lt $timeout) {
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                if ($key.Key -eq [ConsoleKey]::Enter) {
+                    $autoResume = $true
+                    break
+                } elseif ($key.Key -eq [ConsoleKey]::Q -or $key.Key -eq [ConsoleKey]::Escape) {
+                    $autoResume = $false
+                    break
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        Write-Host ""
+
+        if ($autoResume) {
+            Write-Host "[MinusAccountLoop] Resuming session now with $rotatedToAccount...`n" -ForegroundColor Green
+            $resumeArgs = @("--conversation=$resumeConvId")
+            foreach ($a in $filteredArgs) {
+                if ($a -notlike '--conversation*' -and $a -ne '-c' -and $a -ne '--continue') {
+                    $resumeArgs += $a
+                }
+            }
+            & $agyExe @resumeArgs
+            exit $LASTEXITCODE
+        }
+    }
 }
 
 exit $exitCode

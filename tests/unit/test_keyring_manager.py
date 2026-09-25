@@ -92,3 +92,40 @@ def test_rate_limit_detection_no_false_positives():
     assert res.returncode == 0, f"Error: {res.stderr}"
     assert "OK" in res.stdout
 
+
+def test_cooldown_until_support():
+    """Test that recordExhaustion and getAccountPoolStatus honor custom cooldownUntil."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_posix = Path(tmp_dir).as_posix()
+        node_script = f"""
+        const path = require('path');
+        const tp = require('./src/tokenPool');
+        const tmpDir = '{tmp_posix}';
+
+        // Record exhaustion with custom 10-hour cooldown
+        const tenHoursMs = 10 * 3600 * 1000;
+        tp.recordExhaustion(tmpDir, 'testuser@example.com', tenHoursMs);
+
+        const statuses = tp.getAccountPoolStatus(tmpDir, ['testuser@example.com']);
+        const target = statuses.find(s => s.account === 'testuser@example.com');
+
+        if (!target) {{
+            console.error('Account not found in status');
+            process.exit(1);
+        }}
+        if (target.isReady) {{
+            console.error('Account should be in cooldown');
+            process.exit(2);
+        }}
+        if (target.cooldownRemainingMin < 550 || target.cooldownRemainingMin > 600) {{
+            console.error('Remaining minutes unexpected:', target.cooldownRemainingMin);
+            process.exit(3);
+        }}
+        console.log('OK');
+        """
+
+        res = subprocess.run(["node", "-e", node_script], cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, f"Error: {res.stderr}"
+        assert "OK" in res.stdout
+
