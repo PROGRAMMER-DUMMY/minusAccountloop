@@ -142,7 +142,7 @@ function Get-BestAvailableAccount($excludeEmail) {
             $earliestAccount = $p
         }
     }
-    Write-Host "[MinusAccountLoop] ⚠️ Notice: All $($availableProfiles.Count) accounts are currently in quota cooldown." -ForegroundColor Yellow
+    Write-Host "[MinusAccountLoop] [!] Notice: All $($availableProfiles.Count) accounts are currently in quota cooldown." -ForegroundColor Yellow
     Write-Host "[MinusAccountLoop] Earliest quota recovery: ~$minRemaining minutes ($earliestAccount). Launching session..." -ForegroundColor Yellow
 
     $allList = @()
@@ -430,11 +430,11 @@ try {
                     }
 
                     $resetHoursDisplay = [Math]::Round($parsedCooldownMs / 3600000, 1)
-                    Write-Host "`n[MinusAccountLoop] ⚠️ Quota exhausted on $targetEmail during this session." -ForegroundColor Yellow
-                    Write-Host "[MinusAccountLoop] ⏱️ Quota cooldown registered for ~$resetHoursDisplay hours." -ForegroundColor Yellow
-                    Write-Host "[MinusAccountLoop] ✅ Workspace auto-rotated to fresh account: $nextAcc" -ForegroundColor Green
-                    Write-Host "[MinusAccountLoop] 🔑 Windows Keyring updated to: $nextAcc" -ForegroundColor Cyan
-                    Write-Host "[MinusAccountLoop] 💡 Ready: Run 'agy -c' to resume this exact conversation with 100% quota!`n" -ForegroundColor Green
+                    Write-Host "`n[MinusAccountLoop] [!] Quota exhausted on $targetEmail during this session." -ForegroundColor Yellow
+                    Write-Host "[MinusAccountLoop] [Cooldown] Quota cooldown registered for ~$resetHoursDisplay hours." -ForegroundColor Yellow
+                    Write-Host "[MinusAccountLoop] [Rotated] Workspace auto-rotated to fresh account: $nextAcc" -ForegroundColor Green
+                    Write-Host "[MinusAccountLoop] [Keyring] Windows Keyring updated to: $nextAcc" -ForegroundColor Cyan
+                    Write-Host "[MinusAccountLoop] [Ready] Run 'agy -c' to resume this exact conversation with 100% quota!`n" -ForegroundColor Green
                 }
             }
         } catch {}
@@ -456,7 +456,7 @@ if ($exhaustionDetected -and $rotatedToAccount -and $exitCode -eq 0) {
     }
 
     if ($resumeConvId) {
-        Write-Host "[MinusAccountLoop] 🚀 Auto-resume ready for conversation $resumeConvId on $rotatedToAccount." -ForegroundColor Green
+        Write-Host "[MinusAccountLoop] [Auto-Resume] Ready for conversation $resumeConvId on $rotatedToAccount." -ForegroundColor Green
         Write-Host "Press [ENTER] to auto-resume immediately (or wait 3s, or [Q] to stay in terminal): " -NoNewline -ForegroundColor Cyan
 
         $autoResume = $true
@@ -478,7 +478,7 @@ if ($exhaustionDetected -and $rotatedToAccount -and $exitCode -eq 0) {
         Write-Host ""
 
         if ($autoResume) {
-            Write-Host "[MinusAccountLoop] Resuming session now with $rotatedToAccount...`n" -ForegroundColor Green
+            Write-Host "[MinusAccountLoop] Resuming session now with $rotatedToAccount ...`n" -ForegroundColor Green
             $resumeArgs = @("--conversation=$resumeConvId")
             foreach ($a in $filteredArgs) {
                 if ($a -notlike '--conversation*' -and $a -ne '-c' -and $a -ne '--continue') {
