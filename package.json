@@ -1,0 +1,121 @@
+{
+  "name": "minus-account-loop",
+  "displayName": "Minus Account Loop — Antigravity Multi-Account Switcher",
+  "description": "Switch between unlimited Google accounts in Antigravity IDE or VS Code with zero restarts, zero terminal interruption, and quota-aware auto-rotation via native Windows Credential Manager.",
+  "version": "2.0.0",
+  "publisher": "minuscorrect",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PROGRAMMER-DUMMY/minusAccountloop"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "minusAccountLoop.saveProfile",
+        "title": "Minus Account Loop: Save Current Profile"
+      },
+      {
+        "command": "minusAccountLoop.switchProfile",
+        "title": "Minus Account Loop: Switch Profile (Browse All Accounts)"
+      },
+      {
+        "command": "minusAccountLoop.autoRotate",
+        "title": "Minus Account Loop: Auto-Rotate to Next Available Account"
+      },
+      {
+        "command": "minusAccountLoop.deleteProfile",
+        "title": "Minus Account Loop: Delete Profile"
+      },
+      {
+        "command": "minusAccountLoop.listProfiles",
+        "title": "Minus Account Loop: List All Profiles"
+      },
+      {
+        "command": "minusAccountLoop.setActiveProfile",
+        "title": "Minus Account Loop: Set Active Profile (No Restart)"
+      },
+      {
+        "command": "minusAccountLoop.distributeAccountsAcrossTerminals",
+        "title": "Minus Account Loop: Distribute Accounts Across Terminals (1 Unique Account per Session)"
+      },
+      {
+        "command": "minusAccountLoop.auditProfiles",
+        "title": "Minus Account Loop: Audit Profiles & Health Diagnostic"
+      }
+    ],
+    "configuration": {
+      "title": "Minus Account Loop",
+      "properties": {
+        "minusAccountLoop.autoRotateImmediately": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically rotate to the next available account when quota hits 0% without waiting for a manual click."
+        },
+        "minusAccountLoop.confirmBeforeSwitch": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prompt for confirmation before reloading editor to switch accounts. Set to false for instant 1-click switching."
+        },
+        "minusAccountLoop.maxQuickSlots": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "maximum": 30,
+          "description": "Number of quick-access slot buttons to display in the status bar (0-30). You can save, switch, and auto-rotate an UNLIMITED number of accounts regardless of this setting."
+        },
+        "minusAccountLoop.preventDuplicateSessions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prevents saving the same active Google account into multiple profile slots."
+        },
+        "minusAccountLoop.surgicalPruning": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prunes non-credential cache and workspace storage when saving profiles, shrinking profile size from ~500MB to ~3MB."
+        },
+        "minusAccountLoop.promptUnsavedChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prompt to save dirty or unsaved files before switching accounts to prevent data loss."
+        },
+        "minusAccountLoop.userDataDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Custom User Data directory (leave empty to auto-detect based on current editor - Antigravity/Code/Cursor/Windsurf)"
+        },
+        "minusAccountLoop.rateLimitCooldownMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "Cooldown between rate limit alerts (milliseconds)"
+        },
+        "minusAccountLoop.logPollIntervalMs": {
+          "type": "number",
+          "default": 30000,
+          "description": "How often to poll logs for rate limit errors (milliseconds)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "lint": "node -e \"console.log('No lint errors')\"",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0"
+  }
+}

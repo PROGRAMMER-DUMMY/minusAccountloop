@@ -1,0 +1,24 @@
+# Node dependencies
+node_modules/
+
+# VS Code extension packages
+*.vsix
+
+# Python cache & test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Development & temporary artifacts
+.vscode-test/
+.vscode/
+_audit/
+scratch/
+.minuscorrect/
+.minuscorrect_sessions/
+*.log
+
+# OS artifacts
+Thumbs.db
+.DS_Store
