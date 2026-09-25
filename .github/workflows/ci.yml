@@ -35,6 +35,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest
 
+      - name: Seed CI Windows Keyring & Profiles
+        shell: powershell
+        run: |
+          $header = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('{"alg":"none","typ":"JWT"}')).TrimEnd('=')
+          $payload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('{"email":"ci-test@example.com"}')).TrimEnd('=')
+          $fakeJwt = "$header.$payload.signature"
+          $credObj = @{ token = @{ access_token = "ci-test-token" }; id_token = $fakeJwt }
+          $credJson = $credObj | ConvertTo-Json -Compress
+
+          $tmpFile = [System.IO.Path]::GetTempFileName()
+          [System.IO.File]::WriteAllText($tmpFile, $credJson, [System.Text.Encoding]::UTF8)
+          powershell.exe -ExecutionPolicy Bypass -File scripts\wincred.ps1 -Action write -Target "gemini:antigravity" -UserName "antigravity" -SecretFile $tmpFile
+          Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+
+          $profileDir = "$env:USERPROFILE\.gemini\profiles"
+          New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+          Set-Content -Path (Join-Path $profileDir "ci-test@example.com.json") -Value "{`"credentialBlob`":$credJson}"
+
       - name: Run Test Suite
         run: |
           pytest -v
+
