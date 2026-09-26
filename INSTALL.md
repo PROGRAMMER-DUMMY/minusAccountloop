@@ -240,3 +240,15 @@ tests\unit\test_keyring_manager.py ...              [100%]
   It launches straight back into your conversation with 100% fresh quota!
 * **If you exited via `Ctrl+C`:** Simply type `agy -c` (or Up Arrow + Enter) to immediately resume on the rotated account.
 
+---
+
+## ⚖️ Terms of Service & Fair Use Disclaimer
+
+**Minus Account Loop** is an independent, open-source client-side developer utility designed to assist software engineers in managing multiple authorized identities across local project directories.
+
+* **Standard OS Keyring Switching:** Operates analogously to `aws-vault`, `gcloud config configurations`, or `git config user.email` by interacting with the official Windows Credential Manager API (`advapi32.dll: CredReadW / CredWriteW`).
+* **Zero Binary Modification:** Does not decompile, alter, reverse-engineer, or inject code into Google's `agy.exe` binary.
+* **No Account Creation Automation:** Does not automate account generation, bypass Google verification, or generate fictitious identities. All profiles are authentic, verified Google accounts explicitly signed in by the user via standard Google OAuth.
+* **Strict Quota Compliance:** Does not circumvent Google's server-side rate limits. When Google issues an HTTP 429 (`RESOURCE_EXHAUSTED`), the tool honors the backoff, records the cooldown window, and skips the depleted account until recovery.
+* **Independent Tooling:** This project is not affiliated with, endorsed by, or sponsored by Google LLC or Alphabet Inc. All product names, logos, and brands are property of their respective owners.
+
