@@ -16,7 +16,7 @@ A developer-native multi-account switcher and quota-aware auto-rotation engine f
 * 🛡️ **Zero Chat State Loss:** Never tampers with `state.vscdb`, `storage.json`, or active chat SQLite databases.
 * ⚡ **Native Windows Credential Manager:** Directly reads and writes the atomic `gemini:antigravity` credential target via Win32 API (`advapi32.dll`) in **<50ms**.
 * 🔄 **Per-Workspace Account Isolation:** Automatically assigns and pins each project directory to a dedicated Google AI Pro account, isolating quota pools across multiple workspaces.
-* ⏱️ **5-Hour Quota Cooldown Awareness:** Tracks Google AI Pro quota exhaustion cooldowns. Depleted accounts are automatically skipped until their quota recovers.
+* ⏱️ **Dynamic Quota Cooldown Awareness:** Tracks Google AI Pro quota exhaustion cooldowns and parses exact recovery windows (e.g. 2h, 24h, 65h) directly from Google's runtime error responses. Depleted accounts are automatically skipped until their quota recovers.
 
 ---
 
@@ -26,6 +26,7 @@ A developer-native multi-account switcher and quota-aware auto-rotation engine f
 Wraps the `agy` command with intelligent workspace binding and quota monitoring:
 * **Directory Pinning:** Automatically binds your current directory (e.g. `~/PycharmProjects/my-app`) to a dedicated account in `~/.gemini/workspace_accounts.json`.
 * **Auto-Cooldown Rotation:** If an account hits quota exhaustion, the next `agy` launch automatically rotates the workspace to a healthy, ready account.
+* **1-Key Auto-Resume:** When quota exhausts, typing `/exit` triggers an automated 3-second auto-resume countdown that seamlessly continues your exact conversation on the next account with full quota.
 * **On-Demand Rotation:** Rotate an account on demand at any time:
   ```powershell
   agy -r           # Rotate current workspace to next ready account
@@ -35,12 +36,31 @@ Wraps the `agy` command with intelligent workspace binding and quota monitoring:
   ```powershell
   agy status       # Displays READY vs COOLDOWN timer for all accounts
   ```
-* **Post-Execution Watcher:** Automatically detects `RESOURCE_EXHAUSTED (code 429)` in `cli.log` upon session completion and tags cooldown immediately.
+* **Post-Execution Watcher:** Automatically detects `RESOURCE_EXHAUSTED (code 429)` in `cli.log` upon session completion (even on `Ctrl+C`) and tags cooldown immediately.
 
 ### 2. VS Code / Antigravity IDE Extension
 * Status bar buttons for 1-click account switching.
 * Silent, non-intrusive rate-limit auto-rotation.
 * Strict regex rate-limit parsing to eliminate false positives.
+
+---
+
+## ⚠️ Operational Safety: Do's & Don'ts
+
+| 🚫 What NOT to Do | Why |
+| :--- | :--- |
+| **DO NOT edit Windows Keyring during an active `agy` session** | The Go binary holds an open HTTP/2 SSE streaming socket tied to the process boot identity. Mutating tokens externally mid-stream causes token/stream mismatch on Google's backend, producing 403 Forbidden, `wsarecv` socket drops, hanging cursors (`█`), and DOM scroll locks. |
+| **DO NOT force-kill with `taskkill /F /IM agy.exe`** | Hard process aborts bypass PowerShell's `finally` block, skipping post-run quota logging and leaving orphaned network sockets. |
+| **DO NOT edit or tamper with SQLite databases (`state.vscdb`)** | Minus Account Loop operates exclusively at the credential layer via Win32 CredWriteW. Tampering with SQLite risks corrupting chat histories. |
+| **DO NOT modify files in `tests/golden/`** | Protected acceptance contracts enforcing the keyring security boundary. |
+
+| ✅ What Is 100% OK to Do | Benefit |
+| :--- | :--- |
+| **Type `/exit` whenever quota runs out** | Launcher detects exhaustion, triggers cooldown, pre-swaps credentials in `<50ms`, and auto-resumes in 3 seconds. |
+| **Press `Ctrl + C` if an output hangs** | PowerShell `finally` safely catches the interrupt, updates pool state, and pre-swaps the keyring. Then run `agy -c` to continue. |
+| **Run `agy status` at any time** | View minute-by-minute cooldown recovery timers across all accounts without affecting any running session. |
+| **Run `agy -r` (or `agy --rotate`)** | Force-rotate current workspace to the next healthy account on demand. |
+| **Add unlimited Google accounts** | Save 3, 7, 10, or more accounts into `~/.gemini/profiles/`. The scheduler balances all of them. |
 
 ---
 

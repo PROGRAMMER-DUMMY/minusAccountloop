@@ -158,6 +158,43 @@ agy --use developer@gmail.com
 
 ---
 
+## ⚠️ Operational Safety & Warnings: What NOT to Do vs. What Is OK to Do
+
+### 🚫 What NOT to Do (Pitfalls & Invariant Breakers)
+
+1. **DO NOT attempt to alter credentials in Windows Keyring while an `agy` session is actively streaming:**
+   * *Why:* `agy.exe` holds an open HTTP/2 SSE streaming socket tied to the identity used when the process booted. Mutating credentials externally while the process is running causes token/stream mismatch on Google's backend, producing `403 Forbidden`, `wsarecv` socket teardown, hanging block cursors (`█`), and DOM scroll locks.
+   * *The Rule:* Process lifetime is credential lifetime. Always let the process restart (via `/exit` or `Ctrl+C`) to load new credentials.
+
+2. **DO NOT force-kill with `taskkill /F /IM agy.exe` or kill PowerShell:**
+   * *Why:* Hard aborts bypass PowerShell's `finally` block, preventing the post-execution quota detection from logging the cooldown to `account_pool_state.json`.
+   * *The Rule:* Exit naturally by typing `/exit` inside `agy`, or press `Ctrl + C` inside the terminal.
+
+3. **DO NOT edit or tamper with SQLite databases (`state.vscdb`):**
+   * *Why:* Minus Account Loop operates exclusively at the credential layer via the Windows Credential Manager API (`advapi32.dll: CredWriteW`). Tampering with internal editor state databases risks chat history corruption.
+
+4. **DO NOT modify files in `tests/golden/`:**
+   * *Why:* Golden tests are strictly read-only acceptance contracts protecting the keyring contract and zero-harm boundaries.
+
+---
+
+### ✅ What Is 100% OK to Do (Safe & Supported Everyday Actions)
+
+1. **Type `/exit` whenever quota runs out:**
+   * Completely safe and recommended. The launcher detects quota exhaustion, enters the account into cooldown, rotates the workspace to the next healthy account, and starts the 3-second auto-resume timer.
+2. **Press `Ctrl + C` if a prompt or output gets stuck:**
+   * The PowerShell `finally` block safely catches the interrupt, updates pool state, and pre-swaps the keyring. Then simply run `agy -c` to continue.
+3. **Run `agy status` at any time:**
+   * View live recovery countdowns, switch counts, and workspace bindings across all accounts without interrupting any running work.
+4. **Run `agy -r` (or `agy --rotate`) to manually force rotation:**
+   * Instantly switch the current workspace to the next healthy account in the pool on demand.
+5. **Add unlimited Google accounts:**
+   * You can save 3, 7, 10, or more accounts into `~/.gemini/profiles/`. The round-robin and cooldown engine scales seamlessly across any number of accounts.
+6. **Work across multiple terminal tabs or project folders simultaneously:**
+   * Each folder maintains its own isolated account binding in `workspace_accounts.json`.
+
+---
+
 ## 🧪 Verifying the Installation
 
 To verify that the Windows Keyring contract and zero-harm invariants are working properly:
