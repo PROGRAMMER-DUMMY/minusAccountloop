@@ -32,7 +32,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'agy.exe'" | ForEach-Object {
 # 2. Get list of all verified profile emails from ~/.gemini/profiles
 $availableProfiles = @()
 if (Test-Path $profilesDir) {
-    $availableProfiles = (Get-ChildItem $profilesDir -Filter "*.json").BaseName
+    $availableProfiles = (Get-ChildItem $profilesDir -Filter "*.json" | Where-Object { $_.BaseName -notlike '_temp*' -and $_.BaseName -match '@' }).BaseName
 }
 
 if ($availableProfiles.Count -eq 0) {
