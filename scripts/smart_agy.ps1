@@ -2,10 +2,8 @@
 # Smart AGY Launcher: Quota-aware workspace account binding, auto-rotation on cooldown,
 # interactive rotation (--rotate / -r), pool diagnostics (--status), and zombie cleanup.
 
-param(
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$AgyArgs
-)
+# Accept raw arguments via $args to prevent PowerShell common parameter binding collision (e.g. -i, -w, -v, -e)
+$AgyArgs = $args
 
 $ErrorActionPreference = 'SilentlyContinue'
 
