@@ -1,6 +1,7 @@
 # @file scripts/smart_codex.ps1
 # Smart Codex Launcher: Multi-account rotation, quota-aware workspace binding,
-# automatic cooldown tracking, 3-second auto-resume, and account onboarding.
+# automatic cooldown tracking, 3-second auto-resume, token health validation,
+# and account onboarding without cross-account resume collision.
 
 # Accept raw arguments via $args to prevent PowerShell common parameter binding collision (e.g. -i, -w, -v, -e)
 $CodexArgs = $args
@@ -48,6 +49,31 @@ function Get-EmailFromAuthFile($path) {
         }
     } catch {}
     return $null
+}
+
+# Helper: Verify if an account's token is valid against OpenAI API
+function Test-CodexTokenValid($email) {
+    $targetFile = if ($email) { Join-Path $profilesDir "$email.json" } else { $authPath }
+    if (-not (Test-Path $targetFile)) { return $false }
+    try {
+        $checkScript = @"
+import urllib.request, json, sys
+try:
+    d = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+    tok = d.get('tokens', {}).get('access_token', '')
+    if not tok: sys.exit(1)
+    req = urllib.request.Request('https://chatgpt.com/backend-api/models', headers={'Authorization': f'Bearer {tok}', 'User-Agent': 'codex'})
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        if resp.code == 200: sys.exit(0)
+    sys.exit(1)
+except:
+    sys.exit(1)
+"@
+        $res = python -c "$checkScript" $targetFile
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 # Helper: Sync active auth.json back to profile store
@@ -207,7 +233,6 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s') {
     $poolRows = @()
     foreach ($p in $availableProfiles) {
         $status = "READY"
-        $color = "Green"
         $rem = Get-CooldownRemainingMin $p
         if ($rem -gt 0) {
             $status = "COOLDOWN (~$rem min)"
@@ -216,11 +241,14 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s') {
         if ($poolState.ContainsKey($p.ToLower())) {
             $sw = $poolState[$p.ToLower()].switchCount
         }
+        $isValid = Test-CodexTokenValid $p
+        $authHealth = if ($isValid) { "VALID" } else { "REVOKED (Login Needed)" }
         $isActive = ($p.ToLower() -eq $activeNow.ToLower())
         $poolRows += [PSCustomObject]@{
             Active = if ($isActive) { ">> ACTIVE <<" } else { "" }
             Email = $p
-            Status = $status
+            PoolStatus = $status
+            AuthHealth = $authHealth
             Switches = $sw
         }
     }
@@ -333,6 +361,21 @@ if ($targetAccount) {
     }
 }
 
+# Verify target account token health before launch
+$tokenOk = Test-CodexTokenValid $targetAccount
+if (-not $tokenOk) {
+    Write-Host "`n[MinusAccountLoop] [!] Stored credentials for $targetAccount are expired or revoked." -ForegroundColor Yellow
+    Write-Host "[MinusAccountLoop] Launching 'codex login' to refresh credentials for $targetAccount..." -ForegroundColor Cyan
+    Write-Host "Please complete the login in your browser.`n" -ForegroundColor DarkGray
+    & $codexExe login
+    $newEmail = Get-EmailFromAuthFile $authPath
+    if ($newEmail) {
+        $dest = Join-Path $profilesDir "$newEmail.json"
+        Copy-Item $authPath $dest -Force
+        $targetAccount = $newEmail
+    }
+}
+
 $activeEmail = Get-EmailFromAuthFile $authPath
 $sessionStartTimeSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
@@ -401,8 +444,8 @@ if ($exhaustionDetected -and $activeEmail) {
         Write-Host "[MinusAccountLoop] [Rotated] Swapped active credentials to: $rotatedTo" -ForegroundColor Green
 
         # 3-Second Auto-Resume Prompt
-        Write-Host "[MinusAccountLoop] [Auto-Resume] Ready to resume session on $rotatedTo." -ForegroundColor Cyan
-        Write-Host "Press [ENTER] to auto-resume immediately (or wait 3s, or [Q] to stay in terminal): " -NoNewline -ForegroundColor Cyan
+        Write-Host "[MinusAccountLoop] [Auto-Resume] Ready to launch fresh session on $rotatedTo (full quota)." -ForegroundColor Cyan
+        Write-Host "Press [ENTER] to continue immediately (or wait 3s, or [Q] to stay in terminal): " -NoNewline -ForegroundColor Cyan
 
         $autoResume = $true
         $timeout = 3
@@ -423,27 +466,10 @@ if ($exhaustionDetected -and $activeEmail) {
         Write-Host ""
 
         if ($autoResume) {
-            Write-Host "[MinusAccountLoop] Resuming session now on $rotatedTo ...`n" -ForegroundColor Green
-            # If user ran with -p auto, resume with -p auto
-            $resumeArgs = @("resume", "--last")
-            if ($CodexArgs -contains "-p") {
-                $idx = [array]::IndexOf($CodexArgs, "-p")
-                if ($idx -ge 0 -and $idx -lt ($CodexArgs.Count - 1)) {
-                    $resumeArgs += "-p"
-                    $resumeArgs += $CodexArgs[$idx + 1]
-                }
-            } elseif ($CodexArgs -contains "--profile") {
-                $idx = [array]::IndexOf($CodexArgs, "--profile")
-                if ($idx -ge 0 -and $idx -lt ($CodexArgs.Count - 1)) {
-                    $resumeArgs += "--profile"
-                    $resumeArgs += $CodexArgs[$idx + 1]
-                }
-            } else {
-                # Default to -p auto if user standard
-                $resumeArgs += "-p"
-                $resumeArgs += "auto"
-            }
-            & $codexExe @resumeArgs
+            # In Codex, sessions are cloud-scoped to account ID. When rotating accounts,
+            # launch fresh session on new account to avoid cross-tenant 401 resume error.
+            Write-Host "[MinusAccountLoop] Launching fresh session on $rotatedTo (full quota) ...`n" -ForegroundColor Green
+            & $codexExe @CodexArgs
             exit $LASTEXITCODE
         }
     }
