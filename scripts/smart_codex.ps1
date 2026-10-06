@@ -215,6 +215,10 @@ function Switch-ActiveAccount($email) {
     $source = Join-Path $profilesDir "$email.json"
     if (Test-Path $source) {
         Sync-ActiveAuthToProfile
+        # Kill background app-server daemon so it does not serve stale cached credentials
+        # to the next TUI bootstrap. Without this, the daemon holds the OLD account's tokens
+        # in memory and the new codex launch gets "workspace routing discovery unauthorized (401)".
+        try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
         Copy-Item $source $authPath -Force
         return $true
     }
@@ -365,15 +369,22 @@ if ($targetAccount) {
 $tokenOk = Test-CodexTokenValid $targetAccount
 if (-not $tokenOk) {
     Write-Host "`n[MinusAccountLoop] [!] Stored credentials for $targetAccount are expired or revoked." -ForegroundColor Yellow
-    Write-Host "[MinusAccountLoop] Launching 'codex login' to refresh credentials for $targetAccount..." -ForegroundColor Cyan
+    Write-Host "[MinusAccountLoop] Launching 'codex login' to refresh credentials..." -ForegroundColor Cyan
     Write-Host "Please complete the login in your browser.`n" -ForegroundColor DarkGray
+    # Kill daemon before login to ensure clean credential state
+    try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
     & $codexExe login
     $newEmail = Get-EmailFromAuthFile $authPath
     if ($newEmail) {
         $dest = Join-Path $profilesDir "$newEmail.json"
         Copy-Item $authPath $dest -Force
         $targetAccount = $newEmail
+        # Update workspace mapping to whatever account actually logged in
+        $mappings[$currentDir] = $newEmail
+        Save-Mappings
     }
+    # Kill daemon again after login to ensure next launch uses fresh tokens
+    try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
 }
 
 $activeEmail = Get-EmailFromAuthFile $authPath
@@ -468,6 +479,8 @@ if ($exhaustionDetected -and $activeEmail) {
         if ($autoResume) {
             # In Codex, sessions are cloud-scoped to account ID. When rotating accounts,
             # launch fresh session on new account to avoid cross-tenant 401 resume error.
+            # Kill daemon to flush stale credentials before launching on rotated account.
+            try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
             Write-Host "[MinusAccountLoop] Launching fresh session on $rotatedTo (full quota) ...`n" -ForegroundColor Green
             & $codexExe @CodexArgs
             exit $LASTEXITCODE
