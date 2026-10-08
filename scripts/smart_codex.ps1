@@ -166,6 +166,35 @@ function Get-BestAvailableAccount($excludeEmail) {
         $sorted = $ready | Sort-Object SwitchCount
         return $sorted[0].Email
     }
+    # Fallback: if all accounts in cooldown, warn user and pick the one closest to recovery
+    $earliestAccount = $null
+    $minRemaining = [int]::MaxValue
+    foreach ($p in $availableProfiles) {
+        $rem = Get-CooldownRemainingMin $p
+        if ($rem -lt $minRemaining) {
+            $minRemaining = $rem
+            $earliestAccount = $p
+        }
+    }
+    if ($availableProfiles.Count -gt 1) {
+        Write-Host "[MinusAccountLoop] [!] Notice: All $($availableProfiles.Count) accounts are currently in quota cooldown." -ForegroundColor Yellow
+        Write-Host "[MinusAccountLoop] Earliest quota recovery: ~$minRemaining minutes ($earliestAccount). Launching session..." -ForegroundColor Yellow
+    }
+
+    $allList = @()
+    foreach ($p in $availableProfiles) {
+        if ($p.ToLower() -ne $excludeEmail.ToLower()) {
+            $lex = 0
+            if ($poolState.ContainsKey($p.ToLower())) {
+                $lex = $poolState[$p.ToLower()].lastExhausted
+            }
+            $allList += [PSCustomObject]@{ Email = $p; LastExhausted = $lex }
+        }
+    }
+    if ($allList.Count -gt 0) {
+        $sortedAll = $allList | Sort-Object LastExhausted
+        return $sortedAll[0].Email
+    }
     return $excludeEmail
 }
 
@@ -410,10 +439,13 @@ if ($exhaustionDetected -and $activeEmail) {
     $nextCandidate = Get-BestAvailableAccount $activeEmail
     if ($nextCandidate -and ($nextCandidate.ToLower() -ne $activeEmail.ToLower())) {
         Write-Host "`n[MinusAccountLoop] [!] Verified quota exhaustion (HTTP 429) on $activeEmail." -ForegroundColor Yellow
-        Write-Host "Press [ENTER] to rotate to $nextCandidate (or [Q] to keep current account): " -NoNewline -ForegroundColor Cyan
+        Write-Host "[MinusAccountLoop] [Cooldown] Registered 3-hour cooldown." -ForegroundColor Yellow
+        Write-Host "[MinusAccountLoop] [Rotated] Swapped active credentials to: $nextCandidate" -ForegroundColor Green
+        Write-Host "[MinusAccountLoop] [Auto-Resume] Ready to launch fresh session on $nextCandidate (full quota)." -ForegroundColor Green
+        Write-Host "Press [ENTER] to continue immediately (or wait 3s, or [Q] to stay in terminal): " -NoNewline -ForegroundColor Cyan
 
         $doRotate = $true
-        $timeout = 5
+        $timeout = 3
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         while ($stopwatch.Elapsed.TotalSeconds -lt $timeout) {
             if ([Console]::KeyAvailable) {
