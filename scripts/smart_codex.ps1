@@ -71,10 +71,15 @@ if (Test-Path $poolFile) {
             if ($prop.Value.PSObject.Properties.Match('cooldownUntil').Count -gt 0) {
                 $cu = [long]$prop.Value.cooldownUntil
             }
+            $ar = $false
+            if ($prop.Value.PSObject.Properties.Match('authRevoked').Count -gt 0) {
+                $ar = [bool]$prop.Value.authRevoked
+            }
             $poolState[$prop.Name.ToLower()] = @{
                 lastExhausted = [long]$prop.Value.lastExhausted
                 switchCount = [int]$prop.Value.switchCount
                 cooldownUntil = $cu
+                authRevoked = $ar
             }
         }
     } catch {}
@@ -90,6 +95,11 @@ function Save-PoolState {
             }
             if ($poolState[$k].ContainsKey('cooldownUntil') -and $poolState[$k].cooldownUntil -gt 0) {
                 $h['cooldownUntil'] = [long]$poolState[$k].cooldownUntil
+            }
+            if ($poolState[$k].ContainsKey('authRevoked') -and $poolState[$k].authRevoked) {
+                $h['authRevoked'] = $true
+            } else {
+                $h['authRevoked'] = $false
             }
             $obj[$k] = $h
         }
@@ -151,10 +161,19 @@ function Get-CooldownRemainingMin($email) {
     return 0
 }
 
+function Is-AccountRevoked($email) {
+    if (-not $email) { return $false }
+    $k = $email.ToLower()
+    if ($poolState.ContainsKey($k) -and $poolState[$k].authRevoked) {
+        return $true
+    }
+    return $false
+}
+
 function Get-BestAvailableAccount($excludeEmail) {
     $ready = @()
     foreach ($p in $availableProfiles) {
-        if ($p.ToLower() -ne $excludeEmail.ToLower() -and -not (Is-AccountInCooldown $p)) {
+        if ($p.ToLower() -ne $excludeEmail.ToLower() -and -not (Is-AccountRevoked $p) -and -not (Is-AccountInCooldown $p)) {
             $sw = 0
             if ($poolState.ContainsKey($p.ToLower())) {
                 $sw = $poolState[$p.ToLower()].switchCount
@@ -166,35 +185,30 @@ function Get-BestAvailableAccount($excludeEmail) {
         $sorted = $ready | Sort-Object SwitchCount
         return $sorted[0].Email
     }
-    # Fallback: if all accounts in cooldown, warn user and pick the one closest to recovery
+
+    # If excludeEmail is not revoked and not in cooldown, it is usable
+    if (-not (Is-AccountRevoked $excludeEmail) -and -not (Is-AccountInCooldown $excludeEmail)) {
+        return $excludeEmail
+    }
+
+    # Fallback: if all valid accounts in cooldown, warn user and pick the one closest to recovery
     $earliestAccount = $null
     $minRemaining = [int]::MaxValue
     foreach ($p in $availableProfiles) {
-        $rem = Get-CooldownRemainingMin $p
-        if ($rem -lt $minRemaining) {
-            $minRemaining = $rem
-            $earliestAccount = $p
+        if (-not (Is-AccountRevoked $p)) {
+            $rem = Get-CooldownRemainingMin $p
+            if ($rem -lt $minRemaining) {
+                $minRemaining = $rem
+                $earliestAccount = $p
+            }
         }
     }
-    if ($availableProfiles.Count -gt 1) {
-        Write-Host "[MinusAccountLoop] [!] Notice: All $($availableProfiles.Count) accounts are currently in quota cooldown." -ForegroundColor Yellow
-        Write-Host "[MinusAccountLoop] Earliest quota recovery: ~$minRemaining minutes ($earliestAccount). Launching session..." -ForegroundColor Yellow
+    if ($earliestAccount) {
+        Write-Host "[MinusAccountLoop] [!] All valid accounts are currently in cooldown." -ForegroundColor Yellow
+        Write-Host "[MinusAccountLoop] Earliest recovery: ~$minRemaining minutes ($earliestAccount). Launching session..." -ForegroundColor Yellow
+        return $earliestAccount
     }
 
-    $allList = @()
-    foreach ($p in $availableProfiles) {
-        if ($p.ToLower() -ne $excludeEmail.ToLower()) {
-            $lex = 0
-            if ($poolState.ContainsKey($p.ToLower())) {
-                $lex = $poolState[$p.ToLower()].lastExhausted
-            }
-            $allList += [PSCustomObject]@{ Email = $p; LastExhausted = $lex }
-        }
-    }
-    if ($allList.Count -gt 0) {
-        $sortedAll = $allList | Sort-Object LastExhausted
-        return $sortedAll[0].Email
-    }
     return $excludeEmail
 }
 
@@ -253,9 +267,13 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s') {
     $poolRows = @()
     foreach ($p in $availableProfiles) {
         $status = "READY"
-        $rem = Get-CooldownRemainingMin $p
-        if ($rem -gt 0) {
-            $status = "COOLDOWN (~$rem min)"
+        if (Is-AccountRevoked $p) {
+            $status = "REVOKED (codex --login-account)"
+        } else {
+            $rem = Get-CooldownRemainingMin $p
+            if ($rem -gt 0) {
+                $status = "COOLDOWN (~$rem min)"
+            }
         }
         $sw = 0
         if ($poolState.ContainsKey($p.ToLower())) {
@@ -327,6 +345,13 @@ if ($CodexArgs -contains '--add-account' -or $CodexArgs -contains '--login-accou
     if ($newEmail) {
         $dest = Join-Path $profilesDir "$newEmail.json"
         Copy-Item $authPath $dest -Force
+        $kNew = $newEmail.ToLower()
+        if (-not $poolState.ContainsKey($kNew)) {
+            $poolState[$kNew] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0; authRevoked = $false }
+        } else {
+            $poolState[$kNew].authRevoked = $false
+        }
+        Save-PoolState
         Write-Host "`n[MinusAccountLoop] Successfully registered and saved: $newEmail" -ForegroundColor Green
     } else {
         Write-Host "`n[MinusAccountLoop] Login was cancelled or failed to produce credentials." -ForegroundColor Red
@@ -357,16 +382,18 @@ $targetAccount = $null
 
 if ($mappings.ContainsKey($currentDir)) {
     $mapped = $mappings[$currentDir]
-    if (Is-AccountInCooldown $mapped) {
+    if (Is-AccountInCooldown $mapped -or (Is-AccountRevoked $mapped)) {
         $targetAccount = Get-BestAvailableAccount $mapped
-        $mappings[$currentDir] = $targetAccount
-        Save-Mappings
+        if ($targetAccount -and ($targetAccount.ToLower() -ne $mapped.ToLower())) {
+            $mappings[$currentDir] = $targetAccount
+            Save-Mappings
+        }
     } else {
         $targetAccount = $mapped
     }
 } else {
     $curActive = Get-EmailFromAuthFile $authPath
-    if ($curActive -and -not (Is-AccountInCooldown $curActive)) {
+    if ($curActive -and -not (Is-AccountInCooldown $curActive) -and -not (Is-AccountRevoked $curActive)) {
         $targetAccount = $curActive
     } else {
         $targetAccount = Get-BestAvailableAccount $curActive
@@ -395,19 +422,21 @@ $exitCode = $LASTEXITCODE
 # Post-execution sync: update profile with any refreshed tokens
 Sync-ActiveAuthToProfile
 
-# Strict Quota Check: ONLY trigger if an authentic HTTP 429 response was received by http_client.
-# NEVER match routine telemetry (account/rateLimits) or user prompt text!
+# Post-execution check: 429 quota exhaustion or 401 token revocation
 $exhaustionDetected = $false
+$authRevokedDetected = $false
 if ($exitCode -ne 0 -and (Test-Path $dbLogs)) {
     try {
         $checkScript = @"
 import sqlite3, os, sys
 db = os.path.expanduser(r"~/.codex/logs_2.sqlite")
 start_ts = int(sys.argv[1])
-detected = False
+exhausted = False
+revoked = False
 if os.path.exists(db):
     conn = sqlite3.connect(db)
     cur = conn.cursor()
+    # Check authentic 429
     cur.execute('''
         SELECT feedback_log_body FROM logs 
         WHERE ts >= ? 
@@ -420,18 +449,64 @@ if os.path.exists(db):
           AND feedback_log_body NOT LIKE '%account/rateLimits%'
         LIMIT 1;
     ''', (start_ts - 5,))
-    row = cur.fetchone()
-    if row:
-        detected = True
+    if cur.fetchone():
+        exhausted = True
+
+    # Check authentic 401 token revocation
+    cur.execute('''
+        SELECT feedback_log_body FROM logs 
+        WHERE ts >= ? 
+          AND (feedback_log_body LIKE '%token_revoked%'
+               OR feedback_log_body LIKE '%workspace routing discovery unauthorized%'
+               OR feedback_log_body LIKE '%Encountered invalidated oauth token%')
+        LIMIT 1;
+    ''', (start_ts - 5,))
+    if cur.fetchone():
+        revoked = True
     conn.close()
-if detected:
+
+if exhausted:
     print("EXHAUSTED")
+if revoked:
+    print("REVOKED")
 "@
         $res = python -c "$checkScript" $sessionStartTimeSec
         if ($res -match "EXHAUSTED") {
             $exhaustionDetected = $true
         }
+        if ($res -match "REVOKED") {
+            $authRevokedDetected = $true
+        }
     } catch {}
+}
+
+# Auto-recovery from revoked or invalidated credentials
+if ($authRevokedDetected -and $activeEmail) {
+    Write-Host "`n[MinusAccountLoop] [!] Credentials for $activeEmail were revoked or invalidated by OpenAI." -ForegroundColor Yellow
+    $kTarget = $activeEmail.ToLower()
+    if (-not $poolState.ContainsKey($kTarget)) {
+        $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0; authRevoked = $true }
+    } else {
+        $poolState[$kTarget].authRevoked = $true
+    }
+    Save-PoolState
+
+    $nextCandidate = Get-BestAvailableAccount $activeEmail
+    if ($nextCandidate -and ($nextCandidate.ToLower() -ne $activeEmail.ToLower())) {
+        Write-Host "[MinusAccountLoop] [Auto-Switch] Automatically switching to valid account: $nextCandidate" -ForegroundColor Green
+        Switch-ActiveAccount $nextCandidate | Out-Null
+        $mappings[$currentDir] = $nextCandidate
+        Save-Mappings
+
+        Write-Host "[MinusAccountLoop] Starting fresh session on $nextCandidate ...`n" -ForegroundColor Green
+        try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
+        & $codexExe @CodexArgs
+        exit $LASTEXITCODE
+    } else {
+        Write-Host "[MinusAccountLoop] [!] No alternative valid accounts found in pool." -ForegroundColor Red
+        Write-Host "[MinusAccountLoop] Please run 'codex --login-account' to re-authenticate." -ForegroundColor Yellow
+        exit $exitCode
+    }
 }
 
 # If quota is GENUINELY exhausted, prompt before rotating
@@ -465,7 +540,7 @@ if ($exhaustionDetected -and $activeEmail) {
         if ($doRotate) {
             $kTarget = $activeEmail.ToLower()
             if (-not $poolState.ContainsKey($kTarget)) {
-                $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0 }
+                $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0; authRevoked = $false }
             }
             $poolState[$kTarget].lastExhausted = $nowMs
             $poolState[$kTarget].cooldownUntil = $nowMs + $defaultCooldownMs
