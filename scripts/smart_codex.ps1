@@ -1,7 +1,6 @@
 # @file scripts/smart_codex.ps1
-# Smart Codex Launcher: Multi-account rotation, quota-aware workspace binding,
-# automatic cooldown tracking, 3-second auto-resume, token health validation,
-# and account onboarding without cross-account resume collision.
+# Smart Codex Launcher: Multi-account rotation, workspace binding,
+# cooldown tracking, explicit rotation controls, and zero false-positive quota checks.
 
 # Accept raw arguments via $args to prevent PowerShell common parameter binding collision (e.g. -i, -w, -v, -e)
 $CodexArgs = $args
@@ -49,31 +48,6 @@ function Get-EmailFromAuthFile($path) {
         }
     } catch {}
     return $null
-}
-
-# Helper: Verify if an account's token is valid against OpenAI API
-function Test-CodexTokenValid($email) {
-    $targetFile = if ($email) { Join-Path $profilesDir "$email.json" } else { $authPath }
-    if (-not (Test-Path $targetFile)) { return $false }
-    try {
-        $checkScript = @"
-import urllib.request, json, sys
-try:
-    d = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-    tok = d.get('tokens', {}).get('access_token', '')
-    if not tok: sys.exit(1)
-    req = urllib.request.Request('https://chatgpt.com/backend-api/models', headers={'Authorization': f'Bearer {tok}', 'User-Agent': 'codex'})
-    with urllib.request.urlopen(req, timeout=3) as resp:
-        if resp.code == 200: sys.exit(0)
-    sys.exit(1)
-except:
-    sys.exit(1)
-"@
-        $res = python -c "$checkScript" $targetFile
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
-    }
 }
 
 # Helper: Sync active auth.json back to profile store
@@ -192,21 +166,6 @@ function Get-BestAvailableAccount($excludeEmail) {
         $sorted = $ready | Sort-Object SwitchCount
         return $sorted[0].Email
     }
-    # Fallback to earliest recovering account
-    $earliestAccount = $null
-    $minRemaining = [int]::MaxValue
-    foreach ($p in $availableProfiles) {
-        $rem = Get-CooldownRemainingMin $p
-        if ($rem -lt $minRemaining) {
-            $minRemaining = $rem
-            $earliestAccount = $p
-        }
-    }
-    if ($earliestAccount) {
-        Write-Host "[MinusAccountLoop] [!] All $($availableProfiles.Count) Codex accounts currently in cooldown." -ForegroundColor Yellow
-        Write-Host "[MinusAccountLoop] Earliest recovery: ~$minRemaining min ($earliestAccount)." -ForegroundColor Yellow
-        return $earliestAccount
-    }
     return $excludeEmail
 }
 
@@ -215,14 +174,42 @@ function Switch-ActiveAccount($email) {
     $source = Join-Path $profilesDir "$email.json"
     if (Test-Path $source) {
         Sync-ActiveAuthToProfile
-        # Kill background app-server daemon so it does not serve stale cached credentials
-        # to the next TUI bootstrap. Without this, the daemon holds the OLD account's tokens
-        # in memory and the new codex launch gets "workspace routing discovery unauthorized (401)".
+        # Flush background daemon to clear cached tokens
         try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
         Copy-Item $source $authPath -Force
         return $true
     }
     return $false
+}
+
+# --- CLI COMMAND: --reset-pool ---
+if ($CodexArgs -contains '--reset-pool') {
+    $poolState = @{}
+    Save-PoolState
+    Write-Host "`n[MinusAccountLoop] All account cooldowns and switch counters have been reset to 0." -ForegroundColor Green
+    exit 0
+}
+
+# --- CLI COMMAND: --use <email> ---
+$useIdx = [array]::IndexOf($CodexArgs, '--use')
+if ($useIdx -ge 0 -and $useIdx -lt ($CodexArgs.Count - 1)) {
+    $targetEmail = $CodexArgs[$useIdx + 1]
+    if (Switch-ActiveAccount $targetEmail) {
+        $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
+        $mappings = @{}
+        if (Test-Path $mappingFile) {
+            try {
+                $mJson = Get-Content $mappingFile -Raw | ConvertFrom-Json
+                foreach ($prop in $mJson.PSObject.Properties) { $mappings[$prop.Name] = $prop.Value }
+            } catch {}
+        }
+        $mappings[$currentDir] = $targetEmail
+        $mappings | ConvertTo-Json -Depth 3 | Set-Content $mappingFile -Encoding utf8
+        Write-Host "`n[MinusAccountLoop] Explicitly set active account to: $targetEmail" -ForegroundColor Green
+    } else {
+        Write-Host "`n[MinusAccountLoop] [!] Profile not found for: $targetEmail" -ForegroundColor Red
+    }
+    exit 0
 }
 
 # --- CLI COMMAND: --status / -s ---
@@ -245,14 +232,11 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s') {
         if ($poolState.ContainsKey($p.ToLower())) {
             $sw = $poolState[$p.ToLower()].switchCount
         }
-        $isValid = Test-CodexTokenValid $p
-        $authHealth = if ($isValid) { "VALID" } else { "REVOKED (Login Needed)" }
         $isActive = ($p.ToLower() -eq $activeNow.ToLower())
         $poolRows += [PSCustomObject]@{
             Active = if ($isActive) { ">> ACTIVE <<" } else { "" }
             Email = $p
             PoolStatus = $status
-            AuthHealth = $authHealth
             Switches = $sw
         }
     }
@@ -266,6 +250,16 @@ if ($CodexArgs -contains '--rotate' -or $CodexArgs -contains '-r') {
     $next = Get-BestAvailableAccount $currentActive
     if ($next -and $next.ToLower() -ne $currentActive.ToLower()) {
         Switch-ActiveAccount $next | Out-Null
+        $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
+        $mappings = @{}
+        if (Test-Path $mappingFile) {
+            try {
+                $mJson = Get-Content $mappingFile -Raw | ConvertFrom-Json
+                foreach ($prop in $mJson.PSObject.Properties) { $mappings[$prop.Name] = $prop.Value }
+            } catch {}
+        }
+        $mappings[$currentDir] = $next
+        $mappings | ConvertTo-Json -Depth 3 | Set-Content $mappingFile -Encoding utf8
         Write-Host "[MinusAccountLoop] Rotated Codex active account to: $next" -ForegroundColor Green
     } else {
         Write-Host "[MinusAccountLoop] No alternate ready account found in pool." -ForegroundColor Yellow
@@ -296,13 +290,10 @@ if ($CodexArgs -contains '--add-account' -or $CodexArgs -contains '--login-accou
     Write-Host "`nPreparing browser login for next account..." -ForegroundColor Cyan
     Write-Host "When browser opens, click 'Continue with Google' and pick the account you want to register.`n" -ForegroundColor Yellow
 
-    # Backup current auth before starting login
     Sync-ActiveAuthToProfile
-    
-    # Run codex login
+    try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
     & $codexExe login
     
-    # Check what email is now logged in
     $newEmail = Get-EmailFromAuthFile $authPath
     if ($newEmail) {
         $dest = Join-Path $profilesDir "$newEmail.json"
@@ -365,28 +356,6 @@ if ($targetAccount) {
     }
 }
 
-# Verify target account token health before launch
-$tokenOk = Test-CodexTokenValid $targetAccount
-if (-not $tokenOk) {
-    Write-Host "`n[MinusAccountLoop] [!] Stored credentials for $targetAccount are expired or revoked." -ForegroundColor Yellow
-    Write-Host "[MinusAccountLoop] Launching 'codex login' to refresh credentials..." -ForegroundColor Cyan
-    Write-Host "Please complete the login in your browser.`n" -ForegroundColor DarkGray
-    # Kill daemon before login to ensure clean credential state
-    try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
-    & $codexExe login
-    $newEmail = Get-EmailFromAuthFile $authPath
-    if ($newEmail) {
-        $dest = Join-Path $profilesDir "$newEmail.json"
-        Copy-Item $authPath $dest -Force
-        $targetAccount = $newEmail
-        # Update workspace mapping to whatever account actually logged in
-        $mappings[$currentDir] = $newEmail
-        Save-Mappings
-    }
-    # Kill daemon again after login to ensure next launch uses fresh tokens
-    try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
-}
-
 $activeEmail = Get-EmailFromAuthFile $authPath
 $sessionStartTimeSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
@@ -397,9 +366,10 @@ $exitCode = $LASTEXITCODE
 # Post-execution sync: update profile with any refreshed tokens
 Sync-ActiveAuthToProfile
 
-# Check for rate-limit / quota events in logs_2.sqlite
+# Strict Quota Check: ONLY trigger if an authentic HTTP 429 response was received by http_client.
+# NEVER match routine telemetry (account/rateLimits) or user prompt text!
 $exhaustionDetected = $false
-if (Test-Path $dbLogs) {
+if ($exitCode -ne 0 -and (Test-Path $dbLogs)) {
     try {
         $checkScript = @"
 import sqlite3, os, sys
@@ -412,10 +382,13 @@ if os.path.exists(db):
     cur.execute('''
         SELECT feedback_log_body FROM logs 
         WHERE ts >= ? 
-          AND (feedback_log_body LIKE '%rate_limit%' 
-               OR feedback_log_body LIKE '%usage limit%' 
-               OR feedback_log_body LIKE '%429%' 
-               OR feedback_log_body LIKE '%quota%')
+          AND level IN ('ERROR', 'WARN')
+          AND target LIKE '%http_client%'
+          AND (feedback_log_body LIKE '%status=429%' 
+               OR feedback_log_body LIKE '%status: 429%' 
+               OR feedback_log_body LIKE '%insufficient_quota%' 
+               OR feedback_log_body LIKE '%rate_limit_exceeded%')
+          AND feedback_log_body NOT LIKE '%account/rateLimits%'
         LIMIT 1;
     ''', (start_ts - 5,))
     row = cur.fetchone()
@@ -432,43 +405,24 @@ if detected:
     } catch {}
 }
 
-# If quota exhausted, register cooldown, rotate, and offer 3s auto-resume
-$rotatedTo = $null
+# If quota is GENUINELY exhausted, prompt before rotating
 if ($exhaustionDetected -and $activeEmail) {
-    $kTarget = $activeEmail.ToLower()
-    if (-not $poolState.ContainsKey($kTarget)) {
-        $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0 }
-    }
-    $poolState[$kTarget].lastExhausted = $nowMs
-    $poolState[$kTarget].cooldownUntil = $nowMs + $defaultCooldownMs
-    $poolState[$kTarget].switchCount = [int]$poolState[$kTarget].switchCount + 1
-    Save-PoolState
+    $nextCandidate = Get-BestAvailableAccount $activeEmail
+    if ($nextCandidate -and ($nextCandidate.ToLower() -ne $activeEmail.ToLower())) {
+        Write-Host "`n[MinusAccountLoop] [!] Verified quota exhaustion (HTTP 429) on $activeEmail." -ForegroundColor Yellow
+        Write-Host "Press [ENTER] to rotate to $nextCandidate (or [Q] to keep current account): " -NoNewline -ForegroundColor Cyan
 
-    $rotatedTo = Get-BestAvailableAccount $activeEmail
-    if ($rotatedTo -and $rotatedTo.ToLower() -ne $activeEmail.ToLower()) {
-        Switch-ActiveAccount $rotatedTo | Out-Null
-        $mappings[$currentDir] = $rotatedTo
-        Save-Mappings
-
-        Write-Host "`n[MinusAccountLoop] [!] Usage limit reached on $activeEmail." -ForegroundColor Yellow
-        Write-Host "[MinusAccountLoop] [Cooldown] Registered 3-hour cooldown." -ForegroundColor Yellow
-        Write-Host "[MinusAccountLoop] [Rotated] Swapped active credentials to: $rotatedTo" -ForegroundColor Green
-
-        # 3-Second Auto-Resume Prompt
-        Write-Host "[MinusAccountLoop] [Auto-Resume] Ready to launch fresh session on $rotatedTo (full quota)." -ForegroundColor Cyan
-        Write-Host "Press [ENTER] to continue immediately (or wait 3s, or [Q] to stay in terminal): " -NoNewline -ForegroundColor Cyan
-
-        $autoResume = $true
-        $timeout = 3
+        $doRotate = $true
+        $timeout = 5
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         while ($stopwatch.Elapsed.TotalSeconds -lt $timeout) {
             if ([Console]::KeyAvailable) {
                 $key = [Console]::ReadKey($true)
                 if ($key.Key -eq [ConsoleKey]::Enter) {
-                    $autoResume = $true
+                    $doRotate = $true
                     break
                 } elseif ($key.Key -eq [ConsoleKey]::Q -or $key.Key -eq [ConsoleKey]::Escape) {
-                    $autoResume = $false
+                    $doRotate = $false
                     break
                 }
             }
@@ -476,12 +430,23 @@ if ($exhaustionDetected -and $activeEmail) {
         }
         Write-Host ""
 
-        if ($autoResume) {
-            # In Codex, sessions are cloud-scoped to account ID. When rotating accounts,
-            # launch fresh session on new account to avoid cross-tenant 401 resume error.
-            # Kill daemon to flush stale credentials before launching on rotated account.
+        if ($doRotate) {
+            $kTarget = $activeEmail.ToLower()
+            if (-not $poolState.ContainsKey($kTarget)) {
+                $poolState[$kTarget] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0 }
+            }
+            $poolState[$kTarget].lastExhausted = $nowMs
+            $poolState[$kTarget].cooldownUntil = $nowMs + $defaultCooldownMs
+            $poolState[$kTarget].switchCount = [int]$poolState[$kTarget].switchCount + 1
+            Save-PoolState
+
+            Switch-ActiveAccount $nextCandidate | Out-Null
+            $mappings[$currentDir] = $nextCandidate
+            Save-Mappings
+
+            Write-Host "[MinusAccountLoop] Swapped active credentials to: $nextCandidate" -ForegroundColor Green
+            Write-Host "[MinusAccountLoop] Starting fresh session on $nextCandidate ...`n" -ForegroundColor Green
             try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
-            Write-Host "[MinusAccountLoop] Launching fresh session on $rotatedTo (full quota) ...`n" -ForegroundColor Green
             & $codexExe @CodexArgs
             exit $LASTEXITCODE
         }
