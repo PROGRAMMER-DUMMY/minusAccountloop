@@ -70,7 +70,7 @@ def check_auth_token(auth_path: str) -> str:
         if not token:
             return "REVOKED"
         req = urllib.request.Request(
-            "https://chatgpt.com/backend-api/codex/models",
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
             headers={"Authorization": f"Bearer {token}", "User-Agent": "codex-cli"},
         )
         with urllib.request.urlopen(req, timeout=2) as resp:
