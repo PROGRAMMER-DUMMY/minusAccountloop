@@ -218,20 +218,24 @@ function Is-AccountRevoked($email) {
 }
 
 function Get-ActiveSessionPid($email) {
-    if (-not $email) { return 0 }
-    $lockPath = Join-Path $activeSessionsDir "$($email.ToLower()).lock"
-    if (Test-Path $lockPath) {
+    if (-not $email -or -not (Test-Path $activeSessionsDir)) { return 0 }
+    $prefix = $email.ToLower()
+    $lockFiles = Get-ChildItem $activeSessionsDir -Filter "$prefix*.lock" -ErrorAction SilentlyContinue
+    foreach ($lf in $lockFiles) {
         try {
-            $lockContent = Get-Content $lockPath -Raw | ConvertFrom-Json
+            $lockContent = Get-Content $lf.FullName -Raw | ConvertFrom-Json
             $lockPid = [int]$lockContent.pid
             if ($lockPid -ne $PID) {
                 $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
                 if ($proc -and -not $proc.HasExited) {
                     return $lockPid
+                } else {
+                    Remove-Item $lf.FullName -Force -ErrorAction SilentlyContinue
                 }
             }
-        } catch {}
-        Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+        } catch {
+            Remove-Item $lf.FullName -Force -ErrorAction SilentlyContinue
+        }
     }
     return 0
 }
@@ -538,6 +542,12 @@ if ($mappings.ContainsKey($currentDir)) {
 
 # Pre-swap active auth if needed
 if ($targetAccount) {
+    $existingPid = Get-ActiveSessionPid $targetAccount
+    if ($existingPid -gt 0) {
+        Write-Host "`n[MinusAccountLoop] [!] Notice: '$targetAccount' is currently active in another terminal (PID $existingPid)." -ForegroundColor Yellow
+        Write-Host "[MinusAccountLoop] Both terminals will run on this account and share its rate limit quota." -ForegroundColor Yellow
+        Write-Host "[MinusAccountLoop] To give this workspace its own separate account, run: codex --login-account`n" -ForegroundColor DarkGray
+    }
     $currentInAuth = Get-EmailFromAuthFile $authPath
     if ($currentInAuth -ne $targetAccount) {
         Switch-ActiveAccount $targetAccount | Out-Null
@@ -551,7 +561,7 @@ $activeEmail = Get-EmailFromAuthFile $authPath
 $sessionStartTimeSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
 # Register active session lock for this terminal
-$myLockFile = Join-Path $activeSessionsDir "$($activeEmail.ToLower()).lock"
+$myLockFile = Join-Path $activeSessionsDir "$($activeEmail.ToLower())_$PID.lock"
 try {
     $lockData = @{ pid = $PID; workspace = $PWD.Path; startTime = $nowMs } | ConvertTo-Json -Compress
     Set-Content -Path $myLockFile -Value $lockData -Encoding utf8
