@@ -28,23 +28,18 @@ if (-not (Test-Path $activeSessionsDir)) {
     New-Item -ItemType Directory -Path $activeSessionsDir -Force | Out-Null
 }
 
-# 1. Clean orphaned zombie codex processes across the machine (parent already exited)
-Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | ForEach-Object {
-    $procId = $_.ProcessId
-    $parentId = $_.ParentProcessId
-    $parent = Get-Process -Id $parentId -ErrorAction SilentlyContinue
-    if (-not $parent) {
-        Stop-Process -Id $procId -ErrorAction SilentlyContinue
-        # Clean any lock tied to this terminated process
-        if (Test-Path $activeSessionsDir) {
-            Get-ChildItem $activeSessionsDir -Filter "*.lock" | ForEach-Object {
-                try {
-                    $lContent = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                    if ($lContent.pid -eq $procId) {
-                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                    }
-                } catch {}
+# 1. Clean stale session locks from dead terminals
+if (Test-Path $activeSessionsDir) {
+    Get-ChildItem $activeSessionsDir -Filter "*.lock" | ForEach-Object {
+        try {
+            $lContent = Get-Content $_.FullName -Raw | ConvertFrom-Json
+            $lockPid = [int]$lContent.pid
+            $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+            if (-not $proc -or $proc.HasExited) {
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
             }
+        } catch {
+            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -294,8 +289,14 @@ function Switch-ActiveAccount($email) {
     $source = Join-Path $profilesDir "$email.json"
     if (Test-Path $source) {
         Sync-ActiveAuthToProfile
-        # Flush background daemon to clear cached tokens
-        try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
+        # Flush background daemon to clear cached tokens ONLY if no other terminal is in session
+        $hasActive = $false
+        if (Test-Path $activeSessionsDir) {
+            $hasActive = ((Get-ChildItem $activeSessionsDir -Filter "*.lock").Count -gt 0)
+        }
+        if (-not $hasActive) {
+            try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
+        }
         Copy-Item $source $authPath -Force
         return $true
     }
@@ -491,6 +492,10 @@ for ($idx = 0; $idx -lt $CodexArgs.Count; $idx++) {
 
 if ($isContinue -and ($finalArgs -notcontains 'resume')) {
     $finalArgs = @('resume', '--last') + $finalArgs
+}
+
+if ($finalArgs -notcontains '--no-daemon') {
+    $finalArgs += '--no-daemon'
 }
 
 if ($mappings.ContainsKey($currentDir)) {
