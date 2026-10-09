@@ -137,8 +137,8 @@ def setup_account_home(email: str) -> str:
                 except Exception:
                     pass
 
-    # 4. Junctions for skills, rules, plugins, sessions
-    for d in ["skills", "rules", "plugins", "sessions"]:
+    # 4. Junctions for skills, rules, plugins, sessions, and sandbox components
+    for d in ["skills", "rules", "plugins", "sessions", ".sandbox", ".sandbox-bin", ".sandbox-secrets", ".tmp"]:
         src = os.path.join(base, d)
         dst = os.path.join(acct_dir, d)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -148,6 +148,20 @@ def setup_account_home(email: str) -> str:
                 subprocess.run(["cmd", "/c", "mklink", "/J", dst, src], capture_output=True)
             except Exception:
                 pass
+
+    # 5. Global state and sandbox guard files
+    try:
+        for item in os.listdir(base):
+            if item.startswith(".codex-") or item.startswith(".sandbox"):
+                src = os.path.join(base, item)
+                dst = os.path.join(acct_dir, item)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
     return acct_dir
 
