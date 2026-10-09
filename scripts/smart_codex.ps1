@@ -655,6 +655,14 @@ if (Test-Path $logCheckerPy) {
     } catch {}
 }
 
+# Clear any stale sandbox error caches
+if (Test-Path "$codexHome\.sandbox\setup_error.json") {
+    Remove-Item "$codexHome\.sandbox\setup_error.json" -Force -ErrorAction SilentlyContinue
+}
+if ($acctHome -and (Test-Path "$acctHome\.sandbox\setup_error.json")) {
+    Remove-Item "$acctHome\.sandbox\setup_error.json" -Force -ErrorAction SilentlyContinue
+}
+
 # Execute Codex
 try {
     & $codexExe @finalArgs
