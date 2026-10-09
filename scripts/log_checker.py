@@ -111,14 +111,20 @@ def setup_account_home(email: str) -> str:
             except Exception:
                 pass
 
-    # Ensure config.toml in account home has sandbox = "unelevated"
+    # Ensure config.toml in account home has sandbox_mode = "danger-full-access"
     acct_cfg = os.path.normpath(os.path.join(acct_dir, "config.toml"))
     if os.path.exists(acct_cfg):
         try:
             with open(acct_cfg, "r", encoding="utf-8") as f:
                 cfg_text = f.read()
+            changed = False
+            if 'sandbox_mode' not in cfg_text:
+                cfg_text = 'sandbox_mode = "danger-full-access"\n' + cfg_text
+                changed = True
             if 'sandbox = "elevated"' in cfg_text:
                 cfg_text = cfg_text.replace('sandbox = "elevated"', 'sandbox = "unelevated"')
+                changed = True
+            if changed:
                 with open(acct_cfg, "w", encoding="utf-8") as f:
                     f.write(cfg_text)
         except Exception:

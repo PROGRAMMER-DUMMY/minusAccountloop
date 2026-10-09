@@ -503,6 +503,10 @@ if ($finalArgs -notcontains '--no-daemon') {
     $finalArgs += '--no-daemon'
 }
 
+if ($finalArgs -notcontains '-s' -and $finalArgs -notcontains '--sandbox') {
+    $finalArgs += @('-s', 'danger-full-access')
+}
+
 if ($mappings.ContainsKey($currentDir)) {
     $mapped = $mappings[$currentDir]
     $isBusy = Is-AccountInActiveSession $mapped
