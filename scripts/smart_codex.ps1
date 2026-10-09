@@ -154,6 +154,27 @@ function Save-PoolState {
     } catch {}
 }
 
+# Workspace account mappings
+$mappings = @{}
+function Load-Mappings {
+    $script:mappings = @{}
+    if (Test-Path $mappingFile) {
+        try {
+            $mJson = Get-Content $mappingFile -Raw | ConvertFrom-Json
+            foreach ($prop in $mJson.PSObject.Properties) {
+                $script:mappings[$prop.Name] = $prop.Value
+            }
+        } catch {}
+    }
+}
+function Save-Mappings {
+    try {
+        $json = $mappings | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($mappingFile, $json, [System.Text.UTF8Encoding]::new($false))
+    } catch {}
+}
+Load-Mappings
+
 # Auto-register currently active auth.json if profile missing
 if (Test-Path $authPath) {
     $curEmail = Get-EmailFromAuthFile $authPath
@@ -322,16 +343,10 @@ if ($useIdx -ge 0 -and $useIdx -lt ($CodexArgs.Count - 1)) {
     $targetEmail = $CodexArgs[$useIdx + 1]
     if (Switch-ActiveAccount $targetEmail) {
         $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
-        $mappings = @{}
-        if (Test-Path $mappingFile) {
-            try {
-                $mJson = Get-Content $mappingFile -Raw | ConvertFrom-Json
-                foreach ($prop in $mJson.PSObject.Properties) { $mappings[$prop.Name] = $prop.Value }
-            } catch {}
-        }
         $mappings[$currentDir] = $targetEmail
-        $mappings | ConvertTo-Json -Depth 3 | Set-Content $mappingFile -Encoding utf8
+        Save-Mappings
         Write-Host "`n[MinusAccountLoop] Explicitly set active account to: $targetEmail" -ForegroundColor Green
+        Write-Host "[MinusAccountLoop] Workspace '$($PWD.Path)' is now bound to: $targetEmail" -ForegroundColor Cyan
     } else {
         Write-Host "`n[MinusAccountLoop] [!] Profile not found for: $targetEmail" -ForegroundColor Red
     }
@@ -384,16 +399,10 @@ if ($CodexArgs -contains '--rotate' -or $CodexArgs -contains '-r') {
     if ($next -and $next.ToLower() -ne $currentActive.ToLower()) {
         Switch-ActiveAccount $next | Out-Null
         $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
-        $mappings = @{}
-        if (Test-Path $mappingFile) {
-            try {
-                $mJson = Get-Content $mappingFile -Raw | ConvertFrom-Json
-                foreach ($prop in $mJson.PSObject.Properties) { $mappings[$prop.Name] = $prop.Value }
-            } catch {}
-        }
         $mappings[$currentDir] = $next
-        $mappings | ConvertTo-Json -Depth 3 | Set-Content $mappingFile -Encoding utf8
+        Save-Mappings
         Write-Host "[MinusAccountLoop] Rotated Codex active account to: $next" -ForegroundColor Green
+        Write-Host "[MinusAccountLoop] Workspace '$($PWD.Path)' is now bound to: $next" -ForegroundColor Cyan
     } else {
         Write-Host "[MinusAccountLoop] No alternate ready account found in pool." -ForegroundColor Yellow
     }
@@ -438,7 +447,14 @@ if ($CodexArgs -contains '--add-account' -or $CodexArgs -contains '--login-accou
             $poolState[$kNew].authRevoked = $false
         }
         Save-PoolState
+
+        # Auto-bind current project directory to this newly logged in account
+        $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
+        $mappings[$currentDir] = $newEmail
+        Save-Mappings
+
         Write-Host "`n[MinusAccountLoop] Successfully registered and saved: $newEmail" -ForegroundColor Green
+        Write-Host "[MinusAccountLoop] Workspace '$($PWD.Path)' is now bound to: $newEmail" -ForegroundColor Cyan
     } else {
         Write-Host "`n[MinusAccountLoop] Login was cancelled or failed to produce credentials." -ForegroundColor Red
     }
@@ -446,24 +462,6 @@ if ($CodexArgs -contains '--add-account' -or $CodexArgs -contains '--login-accou
 }
 
 # --- NORMAL CODEX LAUNCH ---
-# Workspace account mapping
-$mappings = @{}
-if (Test-Path $mappingFile) {
-    try {
-        $mJson = Get-Content $mappingFile -Raw | ConvertFrom-Json
-        foreach ($prop in $mJson.PSObject.Properties) {
-            $mappings[$prop.Name] = $prop.Value
-        }
-    } catch {}
-}
-
-function Save-Mappings {
-    try {
-        $json = $mappings | ConvertTo-Json -Depth 3
-        [System.IO.File]::WriteAllText($mappingFile, $json, [System.Text.UTF8Encoding]::new($false))
-    } catch {}
-}
-
 $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
 $targetAccount = $null
 
