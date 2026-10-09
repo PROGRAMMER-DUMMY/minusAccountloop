@@ -23,6 +23,41 @@ $dbLogs = "$codexHome\logs_2.sqlite"
 $defaultCooldownMs = 3 * 3600 * 1000 # 3 hours default reset for ChatGPT
 $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
+# 1. Clean orphaned zombie codex processes across the machine (parent already exited)
+Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | ForEach-Object {
+    $procId = $_.ProcessId
+    $parentId = $_.ParentProcessId
+    $parent = Get-Process -Id $parentId -ErrorAction SilentlyContinue
+    if (-not $parent) {
+        Stop-Process -Id $procId -ErrorAction SilentlyContinue
+    }
+}
+
+# 2. Clear stale maintenance locks
+$staleMaintLock = "$codexHome\.sqlite-maintenance.lock"
+if (Test-Path $staleMaintLock) {
+    Remove-Item $staleMaintLock -Force -ErrorAction SilentlyContinue
+}
+
+# 3. Helper: Auto-trust workspace in config.toml and auto.config.toml (eliminates trust prompts)
+function Ensure-WorkspaceTrusted($dir) {
+    if (-not $dir) { return }
+    $cleanDir = $dir.TrimEnd('\/').ToLower()
+    foreach ($cfgName in @("config.toml", "auto.config.toml")) {
+        $cFile = Join-Path $codexHome $cfgName
+        if (Test-Path $cFile) {
+            try {
+                $content = Get-Content $cFile -Raw
+                $needle = "[projects.'$cleanDir']"
+                if ($content -notmatch [regex]::Escape($needle)) {
+                    $block = "`n[projects.'$cleanDir']`ntrust_level = `"trusted`"`n"
+                    Add-Content -Path $cFile -Value $block -Encoding utf8
+                }
+            } catch {}
+        }
+    }
+}
+
 if (-not (Test-Path $profilesDir)) {
     New-Item -ItemType Directory -Path $profilesDir -Force | Out-Null
 }
@@ -380,6 +415,39 @@ function Save-Mappings {
 $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
 $targetAccount = $null
 
+# Parse and normalize arguments (translate -c or --continue to resume --last)
+$isContinue = $false
+$finalArgs = @()
+$skipNext = $false
+
+for ($idx = 0; $idx -lt $CodexArgs.Count; $idx++) {
+    if ($skipNext) {
+        $skipNext = $false
+        continue
+    }
+    $curr = $CodexArgs[$idx]
+    if ($curr -eq '--continue') {
+        $isContinue = $true
+        continue
+    } elseif ($curr -eq '-c') {
+        $next = if (($idx + 1) -lt $CodexArgs.Count) { $CodexArgs[$idx + 1] } else { $null }
+        if (-not $next -or $next.StartsWith('-') -or ($next -notmatch '=')) {
+            $isContinue = $true
+            continue
+        } else {
+            $finalArgs += $curr
+            $finalArgs += $next
+            $skipNext = $true
+            continue
+        }
+    }
+    $finalArgs += $curr
+}
+
+if ($isContinue -and ($finalArgs -notcontains 'resume')) {
+    $finalArgs = @('resume', '--last') + $finalArgs
+}
+
 if ($mappings.ContainsKey($currentDir)) {
     $mapped = $mappings[$currentDir]
     if (Is-AccountInCooldown $mapped -or (Is-AccountRevoked $mapped)) {
@@ -392,11 +460,17 @@ if ($mappings.ContainsKey($currentDir)) {
         $targetAccount = $mapped
     }
 } else {
-    $curActive = Get-EmailFromAuthFile $authPath
-    if ($curActive -and -not (Is-AccountInCooldown $curActive) -and -not (Is-AccountRevoked $curActive)) {
-        $targetAccount = $curActive
+    $assignedEmails = $mappings.Values
+    $unassigned = $availableProfiles | Where-Object { $assignedEmails -notcontains $_ -and -not (Is-AccountRevoked $_) -and -not (Is-AccountInCooldown $_) }
+    if ($unassigned -and $unassigned.Count -gt 0) {
+        $targetAccount = $unassigned[0]
     } else {
-        $targetAccount = Get-BestAvailableAccount $curActive
+        $curActive = Get-EmailFromAuthFile $authPath
+        if ($curActive -and -not (Is-AccountInCooldown $curActive) -and -not (Is-AccountRevoked $curActive)) {
+            $targetAccount = $curActive
+        } else {
+            $targetAccount = Get-BestAvailableAccount $curActive
+        }
     }
     if ($targetAccount) {
         $mappings[$currentDir] = $targetAccount
@@ -412,11 +486,14 @@ if ($targetAccount) {
     }
 }
 
+# Ensure directory is trusted so Codex never prompts with folder trust questions
+Ensure-WorkspaceTrusted $PWD.Path
+
 $activeEmail = Get-EmailFromAuthFile $authPath
 $sessionStartTimeSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
 # Execute Codex
-& $codexExe @CodexArgs
+& $codexExe @finalArgs
 $exitCode = $LASTEXITCODE
 
 # Post-execution sync: update profile with any refreshed tokens
@@ -500,7 +577,7 @@ if ($authRevokedDetected -and $activeEmail) {
 
         Write-Host "[MinusAccountLoop] Starting fresh session on $nextCandidate ...`n" -ForegroundColor Green
         try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
-        & $codexExe @CodexArgs
+        & $codexExe @finalArgs
         exit $LASTEXITCODE
     } else {
         Write-Host "[MinusAccountLoop] [!] No alternative valid accounts found in pool." -ForegroundColor Red
@@ -554,7 +631,7 @@ if ($exhaustionDetected -and $activeEmail) {
             Write-Host "[MinusAccountLoop] Swapped active credentials to: $nextCandidate" -ForegroundColor Green
             Write-Host "[MinusAccountLoop] Starting fresh session on $nextCandidate ...`n" -ForegroundColor Green
             try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
-            & $codexExe @CodexArgs
+            & $codexExe @finalArgs
             exit $LASTEXITCODE
         }
     }
