@@ -644,6 +644,17 @@ try {
     Set-Content -Path $myLockFile -Value $lockData -Encoding utf8
 } catch {}
 
+# Setup isolated account home so concurrent terminals never collide or overwrite auth.json
+$acctHome = $null
+if (Test-Path $logCheckerPy) {
+    try {
+        $acctHome = (python $logCheckerPy --setup-home "$activeEmail").Trim()
+        if ($acctHome -and (Test-Path $acctHome)) {
+            $env:CODEX_HOME = $acctHome
+        }
+    } catch {}
+}
+
 # Execute Codex
 try {
     & $codexExe @finalArgs
@@ -654,8 +665,16 @@ try {
     }
 }
 
-# Post-execution sync: update profile with any refreshed tokens
-Sync-ActiveAuthToProfile
+# Sync back refreshed tokens from isolated account home to profile
+if ($acctHome -and (Test-Path (Join-Path $acctHome "auth.json"))) {
+    try {
+        $acctAuthPath = Join-Path $acctHome "auth.json"
+        Copy-Item $acctAuthPath (Join-Path $profilesDir "$activeEmail.json") -Force
+        Copy-Item $acctAuthPath $authPath -Force
+    } catch {}
+} else {
+    Sync-ActiveAuthToProfile
+}
 
 # Post-execution check: 429 quota exhaustion or 401 token revocation
 $exhaustionDetected = $false

@@ -1,6 +1,7 @@
 """Log checker for quota exhaustion (429) and auth revocation (401)."""
 
 import os
+import shutil
 import sqlite3
 import sys
 
@@ -86,9 +87,78 @@ def check_auth_token(auth_path: str) -> str:
     return "UNKNOWN"
 
 
+def setup_account_home(email: str) -> str:
+    """Configures an isolated CODEX_HOME directory for the specified account."""
+    base = os.path.expanduser("~/.codex")
+    acct_dir = os.path.join(base, "accounts", email.lower())
+    os.makedirs(acct_dir, exist_ok=True)
+
+    # 1. Place dedicated auth.json
+    profile = os.path.join(base, "profiles", f"{email}.json")
+    dst_auth = os.path.join(acct_dir, "auth.json")
+    if os.path.exists(profile):
+        shutil.copy2(profile, dst_auth)
+    elif os.path.exists(os.path.join(base, "auth.json")):
+        shutil.copy2(os.path.join(base, "auth.json"), dst_auth)
+
+    # 2. Config files
+    for cfg in ["config.toml", "auto.config.toml", "models_cache.json", "version.json"]:
+        src = os.path.join(base, cfg)
+        dst = os.path.join(acct_dir, cfg)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                shutil.copy2(src, dst)
+            except Exception:
+                pass
+
+    # 3. Session and DB files
+    db_files = [
+        "session_index.jsonl",
+        "history.jsonl",
+        "thread_history_1.sqlite",
+        "thread_history_1.sqlite-shm",
+        "thread_history_1.sqlite-wal",
+        "state_5.sqlite",
+        "state_5.sqlite-shm",
+        "state_5.sqlite-wal",
+        "logs_2.sqlite",
+        "logs_2.sqlite-shm",
+        "logs_2.sqlite-wal",
+    ]
+    for db in db_files:
+        src = os.path.join(base, db)
+        dst = os.path.join(acct_dir, db)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                os.link(src, dst)
+            except Exception:
+                try:
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass
+
+    # 4. Junctions for skills, rules, plugins, sessions
+    for d in ["skills", "rules", "plugins", "sessions"]:
+        src = os.path.join(base, d)
+        dst = os.path.join(acct_dir, d)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                import subprocess
+
+                subprocess.run(["cmd", "/c", "mklink", "/J", dst, src], capture_output=True)
+            except Exception:
+                pass
+
+    return acct_dir
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--check-token":
         print(check_auth_token(sys.argv[2]))
+        sys.exit(0)
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "--setup-home":
+        print(setup_account_home(sys.argv[2]))
         sys.exit(0)
 
     if len(sys.argv) < 3:
@@ -99,4 +169,5 @@ if __name__ == "__main__":
     outcomes = check_logs(db, ts)
     for outcome in outcomes:
         print(outcome)
+
 

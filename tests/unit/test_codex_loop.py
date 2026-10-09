@@ -152,3 +152,18 @@ def test_check_auth_token():
             os.remove(temp_auth)
 
 
+def test_setup_account_home():
+    from scripts.log_checker import setup_account_home
+    import shutil
+
+    test_email = "unit_test_account@example.com"
+    home_path = setup_account_home(test_email)
+    try:
+        assert os.path.exists(home_path)
+        assert os.path.isdir(home_path)
+    finally:
+        if os.path.exists(home_path):
+            shutil.rmtree(home_path, ignore_errors=True)
+
+
+
