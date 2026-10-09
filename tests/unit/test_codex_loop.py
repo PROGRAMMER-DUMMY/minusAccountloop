@@ -1,8 +1,15 @@
-import json
 import base64
+import json
 import os
+import sqlite3
+import sys
 import tempfile
+from pathlib import Path
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # verifies: tests/unit/test_codex_loop.py
 # Rationale: Ensures multi-account rotation for OpenAI Codex adheres to
@@ -76,3 +83,53 @@ def test_select_best_available_account_skips_busy_session():
     ready.sort(key=lambda x: x[1])
     assert len(ready) == 1
     assert ready[0][0] == "acc2@example.com"
+
+
+def test_log_checker_detects_exhaustion_and_revocation():
+    from scripts.log_checker import check_logs
+
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tf:
+        temp_db = tf.name
+
+    try:
+        conn = sqlite3.connect(temp_db)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE logs (
+                ts INTEGER,
+                level TEXT,
+                target TEXT,
+                feedback_log_body TEXT
+            )
+            """
+        )
+        # Non-matching row
+        cur.execute(
+            "INSERT INTO logs VALUES (?, ?, ?, ?)",
+            (100, "INFO", "app", "normal startup"),
+        )
+        # 429 exhaustion row
+        cur.execute(
+            "INSERT INTO logs VALUES (?, ?, ?, ?)",
+            (105, "ERROR", "codex::http_client", "status=429 rate_limit_exceeded"),
+        )
+        # 401 revocation row
+        cur.execute(
+            "INSERT INTO logs VALUES (?, ?, ?, ?)",
+            (106, "ERROR", "codex::auth", "workspace routing discovery unauthorized"),
+        )
+        conn.commit()
+        conn.close()
+
+        results = check_logs(temp_db, 100)
+        assert "EXHAUSTED" in results
+        assert "REVOKED" in results
+
+        # Test timestamp filter
+        results_future = check_logs(temp_db, 200)
+        assert results_future == []
+    finally:
+        if os.path.exists(temp_db):
+            os.remove(temp_db)
+

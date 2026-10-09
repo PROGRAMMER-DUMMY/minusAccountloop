@@ -149,7 +149,8 @@ function Save-PoolState {
             }
             $obj[$k] = $h
         }
-        $obj | ConvertTo-Json -Depth 3 | Set-Content $poolFile -Encoding utf8
+        $json = $obj | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($poolFile, $json, [System.Text.UTF8Encoding]::new($false))
     } catch {}
 }
 
@@ -454,7 +455,8 @@ if (Test-Path $mappingFile) {
 
 function Save-Mappings {
     try {
-        $mappings | ConvertTo-Json -Depth 3 | Set-Content $mappingFile -Encoding utf8
+        $json = $mappings | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($mappingFile, $json, [System.Text.UTF8Encoding]::new($false))
     } catch {}
 }
 
@@ -573,55 +575,15 @@ $exhaustionDetected = $false
 $authRevokedDetected = $false
 if ($exitCode -ne 0 -and (Test-Path $dbLogs)) {
     try {
-        $checkScript = @"
-import sqlite3, os, sys
-db = os.path.expanduser(r"~/.codex/logs_2.sqlite")
-start_ts = int(sys.argv[1])
-exhausted = False
-revoked = False
-if os.path.exists(db):
-    conn = sqlite3.connect(db)
-    cur = conn.cursor()
-    # Check authentic 429
-    cur.execute('''
-        SELECT feedback_log_body FROM logs 
-        WHERE ts >= ? 
-          AND level IN ('ERROR', 'WARN')
-          AND target LIKE '%http_client%'
-          AND (feedback_log_body LIKE '%status=429%' 
-               OR feedback_log_body LIKE '%status: 429%' 
-               OR feedback_log_body LIKE '%insufficient_quota%' 
-               OR feedback_log_body LIKE '%rate_limit_exceeded%')
-          AND feedback_log_body NOT LIKE '%account/rateLimits%'
-        LIMIT 1;
-    ''', (start_ts - 5,))
-    if cur.fetchone():
-        exhausted = True
-
-    # Check authentic 401 token revocation
-    cur.execute('''
-        SELECT feedback_log_body FROM logs 
-        WHERE ts >= ? 
-          AND (feedback_log_body LIKE '%token_revoked%'
-               OR feedback_log_body LIKE '%workspace routing discovery unauthorized%'
-               OR feedback_log_body LIKE '%Encountered invalidated oauth token%')
-        LIMIT 1;
-    ''', (start_ts - 5,))
-    if cur.fetchone():
-        revoked = True
-    conn.close()
-
-if exhausted:
-    print("EXHAUSTED")
-if revoked:
-    print("REVOKED")
-"@
-        $res = python -c "$checkScript" $sessionStartTimeSec
-        if ($res -match "EXHAUSTED") {
-            $exhaustionDetected = $true
-        }
-        if ($res -match "REVOKED") {
-            $authRevokedDetected = $true
+        $logCheckerPy = Join-Path $PSScriptRoot "log_checker.py"
+        if (Test-Path $logCheckerPy) {
+            $res = python $logCheckerPy "$dbLogs" $sessionStartTimeSec
+            if ($res -match "EXHAUSTED") {
+                $exhaustionDetected = $true
+            }
+            if ($res -match "REVOKED") {
+                $authRevokedDetected = $true
+            }
         }
     } catch {}
 }
