@@ -133,3 +133,22 @@ def test_log_checker_detects_exhaustion_and_revocation():
         if os.path.exists(temp_db):
             os.remove(temp_db)
 
+
+def test_check_auth_token():
+    from scripts.log_checker import check_auth_token
+
+    # Non-existent file
+    assert check_auth_token("non_existent_file.json") == "UNKNOWN"
+
+    # Missing access_token
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tf:
+        json.dump({"tokens": {}}, tf)
+        temp_auth = tf.name
+
+    try:
+        assert check_auth_token(temp_auth) == "REVOKED"
+    finally:
+        if os.path.exists(temp_auth):
+            os.remove(temp_auth)
+
+

@@ -550,6 +550,85 @@ if ($targetAccount) {
     if ($currentInAuth -ne $targetAccount) {
         Switch-ActiveAccount $targetAccount | Out-Null
     }
+
+    # Pre-flight token validation
+    $logCheckerPy = Join-Path $PSScriptRoot "log_checker.py"
+    if (Test-Path $logCheckerPy) {
+        $tCheck = python $logCheckerPy --check-token "$authPath"
+        if ($tCheck -eq "REVOKED") {
+            $kAcc = $targetAccount.ToLower()
+            if (-not $poolState.ContainsKey($kAcc)) {
+                $poolState[$kAcc] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0; authRevoked = $true }
+            } else {
+                $poolState[$kAcc].authRevoked = $true
+            }
+            Save-PoolState
+            $alt = Get-BestAvailableAccount $targetAccount
+            if ($alt -and $alt.ToLower() -ne $targetAccount.ToLower()) {
+                $targetAccount = $alt
+                Switch-ActiveAccount $targetAccount | Out-Null
+            }
+        } elseif ($tCheck -eq "EXHAUSTED") {
+            $kAcc = $targetAccount.ToLower()
+            $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            if (-not $poolState.ContainsKey($kAcc)) {
+                $poolState[$kAcc] = @{ lastExhausted = $nowEpoch; switchCount = 0; cooldownUntil = ($nowEpoch + 18000000); authRevoked = $false }
+            } else {
+                $poolState[$kAcc].lastExhausted = $nowEpoch
+                $poolState[$kAcc].cooldownUntil = ($nowEpoch + 18000000)
+            }
+            Save-PoolState
+            $alt = Get-BestAvailableAccount $targetAccount
+            if ($alt -and $alt.ToLower() -ne $targetAccount.ToLower()) {
+                $targetAccount = $alt
+                Switch-ActiveAccount $targetAccount | Out-Null
+            }
+        }
+    }
+}
+
+# Verify account readiness before attempting launch
+$isRevoked = Is-AccountRevoked $targetAccount
+$inCooldown = Is-AccountInCooldown $targetAccount
+if ($isRevoked -or $inCooldown) {
+    if ($isRevoked) {
+        Write-Host "`n[MinusAccountLoop] [!] Account '$targetAccount' has an expired or revoked OpenAI OAuth token (401)." -ForegroundColor Red
+    } elseif ($inCooldown) {
+        $rem = Get-CooldownRemainingMin $targetAccount
+        Write-Host "`n[MinusAccountLoop] [!] Account '$targetAccount' reached its 5-hour rate limit (~$rem min remaining until reset)." -ForegroundColor Yellow
+    }
+
+    Write-Host "[MinusAccountLoop] All accounts in the pool are currently exhausted or revoked." -ForegroundColor Yellow
+    Write-Host "[MinusAccountLoop] Please authenticate an account to continue.`n" -ForegroundColor Cyan
+
+    $choice = Read-Host "Would you like to log in now? (Y/n)"
+    if ($choice -eq '' -or $choice -match '^[Yy]') {
+        try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
+        & $codexExe login
+        $newEmail = Get-EmailFromAuthFile $authPath
+        if ($newEmail) {
+            $dest = Join-Path $profilesDir "$newEmail.json"
+            Copy-Item $authPath $dest -Force
+            $kNew = $newEmail.ToLower()
+            if (-not $poolState.ContainsKey($kNew)) {
+                $poolState[$kNew] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0; authRevoked = $false }
+            } else {
+                $poolState[$kNew].authRevoked = $false
+                $poolState[$kNew].cooldownUntil = 0
+            }
+            Save-PoolState
+            $mappings[$currentDir] = $newEmail
+            Save-Mappings
+            Write-Host "`n[MinusAccountLoop] Successfully authenticated and bound: $newEmail" -ForegroundColor Green
+            $targetAccount = $newEmail
+        } else {
+            Write-Host "`n[MinusAccountLoop] Login was cancelled." -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        Write-Host "`n[MinusAccountLoop] Aborted. Run 'codex --login-account' when ready." -ForegroundColor DarkGray
+        exit 1
+    }
 }
 
 # Ensure directory is trusted so Codex never prompts with folder trust questions
