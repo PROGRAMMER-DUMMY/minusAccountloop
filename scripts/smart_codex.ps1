@@ -19,9 +19,14 @@ $profilesDir = "$codexHome\profiles"
 $mappingFile = "$codexHome\workspace_accounts.json"
 $poolFile = "$codexHome\account_pool_state.json"
 $dbLogs = "$codexHome\logs_2.sqlite"
+$activeSessionsDir = "$codexHome\active_sessions"
 
 $defaultCooldownMs = 3 * 3600 * 1000 # 3 hours default reset for ChatGPT
 $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+if (-not (Test-Path $activeSessionsDir)) {
+    New-Item -ItemType Directory -Path $activeSessionsDir -Force | Out-Null
+}
 
 # 1. Clean orphaned zombie codex processes across the machine (parent already exited)
 Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | ForEach-Object {
@@ -30,6 +35,17 @@ Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | ForEach-Object {
     $parent = Get-Process -Id $parentId -ErrorAction SilentlyContinue
     if (-not $parent) {
         Stop-Process -Id $procId -ErrorAction SilentlyContinue
+        # Clean any lock tied to this terminated process
+        if (Test-Path $activeSessionsDir) {
+            Get-ChildItem $activeSessionsDir -Filter "*.lock" | ForEach-Object {
+                try {
+                    $lContent = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                    if ($lContent.pid -eq $procId) {
+                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                    }
+                } catch {}
+            }
+        }
     }
 }
 
@@ -205,10 +221,36 @@ function Is-AccountRevoked($email) {
     return $false
 }
 
+function Get-ActiveSessionPid($email) {
+    if (-not $email) { return 0 }
+    $lockPath = Join-Path $activeSessionsDir "$($email.ToLower()).lock"
+    if (Test-Path $lockPath) {
+        try {
+            $lockContent = Get-Content $lockPath -Raw | ConvertFrom-Json
+            $lockPid = [int]$lockContent.pid
+            if ($lockPid -ne $PID) {
+                $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+                if ($proc -and -not $proc.HasExited) {
+                    return $lockPid
+                }
+            }
+        } catch {}
+        Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+    }
+    return 0
+}
+
+function Is-AccountInActiveSession($email) {
+    return ((Get-ActiveSessionPid $email) -gt 0)
+}
+
 function Get-BestAvailableAccount($excludeEmail) {
     $ready = @()
     foreach ($p in $availableProfiles) {
-        if ($p.ToLower() -ne $excludeEmail.ToLower() -and -not (Is-AccountRevoked $p) -and -not (Is-AccountInCooldown $p)) {
+        $isBusy = Is-AccountInActiveSession $p
+        $inCd = Is-AccountInCooldown $p
+        $isRev = Is-AccountRevoked $p
+        if ($p.ToLower() -ne $excludeEmail.ToLower() -and -not $isRev -and -not $inCd -and -not $isBusy) {
             $sw = 0
             if ($poolState.ContainsKey($p.ToLower())) {
                 $sw = $poolState[$p.ToLower()].switchCount
@@ -221,16 +263,16 @@ function Get-BestAvailableAccount($excludeEmail) {
         return $sorted[0].Email
     }
 
-    # If excludeEmail is not revoked and not in cooldown, it is usable
-    if (-not (Is-AccountRevoked $excludeEmail) -and -not (Is-AccountInCooldown $excludeEmail)) {
+    # If excludeEmail is not busy, not revoked, and not in cooldown, it is usable
+    if (-not (Is-AccountInActiveSession $excludeEmail) -and -not (Is-AccountRevoked $excludeEmail) -and -not (Is-AccountInCooldown $excludeEmail)) {
         return $excludeEmail
     }
 
-    # Fallback: if all valid accounts in cooldown, warn user and pick the one closest to recovery
+    # Fallback: if all valid accounts in cooldown, pick non-busy account closest to recovery
     $earliestAccount = $null
     $minRemaining = [int]::MaxValue
     foreach ($p in $availableProfiles) {
-        if (-not (Is-AccountRevoked $p)) {
+        if (-not (Is-AccountRevoked $p) -and -not (Is-AccountInActiveSession $p)) {
             $rem = Get-CooldownRemainingMin $p
             if ($rem -lt $minRemaining) {
                 $minRemaining = $rem
@@ -239,7 +281,7 @@ function Get-BestAvailableAccount($excludeEmail) {
         }
     }
     if ($earliestAccount) {
-        Write-Host "[MinusAccountLoop] [!] All valid accounts are currently in cooldown." -ForegroundColor Yellow
+        Write-Host "[MinusAccountLoop] [!] All idle accounts are in cooldown." -ForegroundColor Yellow
         Write-Host "[MinusAccountLoop] Earliest recovery: ~$minRemaining minutes ($earliestAccount). Launching session..." -ForegroundColor Yellow
         return $earliestAccount
     }
@@ -301,8 +343,11 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s') {
 
     $poolRows = @()
     foreach ($p in $availableProfiles) {
+        $activePid = Get-ActiveSessionPid $p
         $status = "READY"
-        if (Is-AccountRevoked $p) {
+        if ($activePid -gt 0) {
+            $status = "IN USE (PID $activePid)"
+        } elseif (Is-AccountRevoked $p) {
             $status = "REVOKED (codex --login-account)"
         } else {
             $rem = Get-CooldownRemainingMin $p
@@ -450,23 +495,29 @@ if ($isContinue -and ($finalArgs -notcontains 'resume')) {
 
 if ($mappings.ContainsKey($currentDir)) {
     $mapped = $mappings[$currentDir]
-    if (Is-AccountInCooldown $mapped -or (Is-AccountRevoked $mapped)) {
+    $isBusy = Is-AccountInActiveSession $mapped
+    if (Is-AccountInCooldown $mapped -or (Is-AccountRevoked $mapped) -or $isBusy) {
         $targetAccount = Get-BestAvailableAccount $mapped
         if ($targetAccount -and ($targetAccount.ToLower() -ne $mapped.ToLower())) {
-            $mappings[$currentDir] = $targetAccount
-            Save-Mappings
+            if ($isBusy) {
+                Write-Host "`n[MinusAccountLoop] [Active Session] $mapped is running in another terminal." -ForegroundColor Cyan
+                Write-Host "[MinusAccountLoop] [Auto-Switch] Automatically assigned idle account: $targetAccount" -ForegroundColor Green
+            } else {
+                $mappings[$currentDir] = $targetAccount
+                Save-Mappings
+            }
         }
     } else {
         $targetAccount = $mapped
     }
 } else {
     $assignedEmails = $mappings.Values
-    $unassigned = $availableProfiles | Where-Object { $assignedEmails -notcontains $_ -and -not (Is-AccountRevoked $_) -and -not (Is-AccountInCooldown $_) }
+    $unassigned = $availableProfiles | Where-Object { $assignedEmails -notcontains $_ -and -not (Is-AccountRevoked $_) -and -not (Is-AccountInCooldown $_) -and -not (Is-AccountInActiveSession $_) }
     if ($unassigned -and $unassigned.Count -gt 0) {
         $targetAccount = $unassigned[0]
     } else {
         $curActive = Get-EmailFromAuthFile $authPath
-        if ($curActive -and -not (Is-AccountInCooldown $curActive) -and -not (Is-AccountRevoked $curActive)) {
+        if ($curActive -and -not (Is-AccountInCooldown $curActive) -and -not (Is-AccountRevoked $curActive) -and -not (Is-AccountInActiveSession $curActive)) {
             $targetAccount = $curActive
         } else {
             $targetAccount = Get-BestAvailableAccount $curActive
@@ -492,9 +543,22 @@ Ensure-WorkspaceTrusted $PWD.Path
 $activeEmail = Get-EmailFromAuthFile $authPath
 $sessionStartTimeSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
+# Register active session lock for this terminal
+$myLockFile = Join-Path $activeSessionsDir "$($activeEmail.ToLower()).lock"
+try {
+    $lockData = @{ pid = $PID; workspace = $PWD.Path; startTime = $nowMs } | ConvertTo-Json -Compress
+    Set-Content -Path $myLockFile -Value $lockData -Encoding utf8
+} catch {}
+
 # Execute Codex
-& $codexExe @finalArgs
-$exitCode = $LASTEXITCODE
+try {
+    & $codexExe @finalArgs
+    $exitCode = $LASTEXITCODE
+} finally {
+    if (Test-Path $myLockFile) {
+        Remove-Item $myLockFile -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # Post-execution sync: update profile with any refreshed tokens
 Sync-ActiveAuthToProfile

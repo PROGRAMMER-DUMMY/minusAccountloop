@@ -53,3 +53,26 @@ def test_select_best_available_account():
     
     ready.sort(key=lambda x: x[1])
     assert ready[0][0] == "acc2@example.com"
+
+
+def test_select_best_available_account_skips_busy_session():
+    pool_state = {
+        "acc1@example.com": {"switchCount": 1, "cooldownUntil": 0, "lastExhausted": 0, "authRevoked": False},
+        "acc2@example.com": {"switchCount": 3, "cooldownUntil": 0, "lastExhausted": 0, "authRevoked": False},
+    }
+    available = ["acc1@example.com", "acc2@example.com"]
+    busy_sessions = {"acc1@example.com": 99999}  # PID 99999 running acc1
+
+    # acc1 has lower switch count (1), but is busy in an active session
+    # The selector must skip acc1 and choose acc2
+    ready = []
+    for acc in available:
+        if acc in busy_sessions:
+            continue
+        state = pool_state.get(acc, {})
+        if not state.get("authRevoked", False) and state.get("cooldownUntil", 0) <= 0:
+            ready.append((acc, state.get("switchCount", 0)))
+
+    ready.sort(key=lambda x: x[1])
+    assert len(ready) == 1
+    assert ready[0][0] == "acc2@example.com"
