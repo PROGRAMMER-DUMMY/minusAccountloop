@@ -20,6 +20,7 @@ $mappingFile = "$codexHome\workspace_accounts.json"
 $poolFile = "$codexHome\account_pool_state.json"
 $dbLogs = "$codexHome\logs_2.sqlite"
 $activeSessionsDir = "$codexHome\active_sessions"
+$logCheckerPy = Join-Path $PSScriptRoot "log_checker.py"
 
 $defaultCooldownMs = 3 * 3600 * 1000 # 3 hours default reset for ChatGPT
 $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()

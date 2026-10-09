@@ -89,27 +89,40 @@ def check_auth_token(auth_path: str) -> str:
 
 def setup_account_home(email: str) -> str:
     """Configures an isolated CODEX_HOME directory for the specified account."""
-    base = os.path.expanduser("~/.codex")
-    acct_dir = os.path.join(base, "accounts", email.lower())
+    base = os.path.normpath(os.path.expanduser("~/.codex"))
+    acct_dir = os.path.normpath(os.path.join(base, "accounts", email.lower()))
     os.makedirs(acct_dir, exist_ok=True)
 
     # 1. Place dedicated auth.json
-    profile = os.path.join(base, "profiles", f"{email}.json")
-    dst_auth = os.path.join(acct_dir, "auth.json")
+    profile = os.path.normpath(os.path.join(base, "profiles", f"{email}.json"))
+    dst_auth = os.path.normpath(os.path.join(acct_dir, "auth.json"))
     if os.path.exists(profile):
         shutil.copy2(profile, dst_auth)
-    elif os.path.exists(os.path.join(base, "auth.json")):
-        shutil.copy2(os.path.join(base, "auth.json"), dst_auth)
+    elif os.path.exists(os.path.normpath(os.path.join(base, "auth.json"))):
+        shutil.copy2(os.path.normpath(os.path.join(base, "auth.json")), dst_auth)
 
     # 2. Config files
     for cfg in ["config.toml", "auto.config.toml", "models_cache.json", "version.json"]:
-        src = os.path.join(base, cfg)
-        dst = os.path.join(acct_dir, cfg)
+        src = os.path.normpath(os.path.join(base, cfg))
+        dst = os.path.normpath(os.path.join(acct_dir, cfg))
         if os.path.exists(src) and not os.path.exists(dst):
             try:
                 shutil.copy2(src, dst)
             except Exception:
                 pass
+
+    # Ensure config.toml in account home has sandbox = "unelevated"
+    acct_cfg = os.path.normpath(os.path.join(acct_dir, "config.toml"))
+    if os.path.exists(acct_cfg):
+        try:
+            with open(acct_cfg, "r", encoding="utf-8") as f:
+                cfg_text = f.read()
+            if 'sandbox = "elevated"' in cfg_text:
+                cfg_text = cfg_text.replace('sandbox = "elevated"', 'sandbox = "unelevated"')
+                with open(acct_cfg, "w", encoding="utf-8") as f:
+                    f.write(cfg_text)
+        except Exception:
+            pass
 
     # 3. Session and DB files
     db_files = [
@@ -126,8 +139,8 @@ def setup_account_home(email: str) -> str:
         "logs_2.sqlite-wal",
     ]
     for db in db_files:
-        src = os.path.join(base, db)
-        dst = os.path.join(acct_dir, db)
+        src = os.path.normpath(os.path.join(base, db))
+        dst = os.path.normpath(os.path.join(acct_dir, db))
         if os.path.exists(src) and not os.path.exists(dst):
             try:
                 os.link(src, dst)
@@ -139,8 +152,8 @@ def setup_account_home(email: str) -> str:
 
     # 4. Junctions for skills, rules, plugins, sessions, and sandbox components
     for d in ["skills", "rules", "plugins", "sessions", ".sandbox", ".sandbox-bin", ".sandbox-secrets", ".tmp"]:
-        src = os.path.join(base, d)
-        dst = os.path.join(acct_dir, d)
+        src = os.path.normpath(os.path.join(base, d))
+        dst = os.path.normpath(os.path.join(acct_dir, d))
         if os.path.exists(src) and not os.path.exists(dst):
             try:
                 import subprocess
@@ -153,8 +166,8 @@ def setup_account_home(email: str) -> str:
     try:
         for item in os.listdir(base):
             if item.startswith(".codex-") or item.startswith(".sandbox"):
-                src = os.path.join(base, item)
-                dst = os.path.join(acct_dir, item)
+                src = os.path.normpath(os.path.join(base, item))
+                dst = os.path.normpath(os.path.join(acct_dir, item))
                 if os.path.isfile(src) and not os.path.exists(dst):
                     try:
                         shutil.copy2(src, dst)
@@ -162,6 +175,15 @@ def setup_account_home(email: str) -> str:
                         pass
     except Exception:
         pass
+
+    # 6. Purge stale setup_error.json
+    for sdir in [base, acct_dir]:
+        err_path = os.path.normpath(os.path.join(sdir, ".sandbox", "setup_error.json"))
+        if os.path.exists(err_path):
+            try:
+                os.remove(err_path)
+            except Exception:
+                pass
 
     return acct_dir
 
