@@ -649,11 +649,11 @@ try {
     Set-Content -Path $myLockFile -Value $lockData -Encoding utf8
 } catch {}
 
-# Setup isolated account home so concurrent terminals never collide or overwrite auth.json
+# Setup isolated workspace/account home so concurrent terminals never collide or overwrite auth.json
 $acctHome = $null
 if (Test-Path $logCheckerPy) {
     try {
-        $acctHome = (python $logCheckerPy --setup-home "$activeEmail").Trim()
+        $acctHome = (python $logCheckerPy --setup-home "$activeEmail" "$PWD").Trim()
         if ($acctHome -and (Test-Path $acctHome)) {
             $env:CODEX_HOME = $acctHome
         }

@@ -87,10 +87,14 @@ def check_auth_token(auth_path: str) -> str:
     return "UNKNOWN"
 
 
-def setup_account_home(email: str) -> str:
-    """Configures an isolated CODEX_HOME directory for the specified account."""
+def setup_account_home(email: str, workspace_dir: str | None = None) -> str:
+    """Configures an isolated CODEX_HOME directory for the specified workspace and account."""
     base = os.path.normpath(os.path.expanduser("~/.codex"))
-    acct_dir = os.path.normpath(os.path.join(base, "accounts", email.lower()))
+    if workspace_dir:
+        ws_name = os.path.basename(os.path.normpath(workspace_dir)).lower()
+        acct_dir = os.path.normpath(os.path.join(base, "workspaces", ws_name))
+    else:
+        acct_dir = os.path.normpath(os.path.join(base, "accounts", email.lower()))
     os.makedirs(acct_dir, exist_ok=True)
 
     # 1. Place dedicated auth.json
@@ -130,29 +134,20 @@ def setup_account_home(email: str) -> str:
         except Exception:
             pass
 
-    # 3. Session and DB files
-    db_files = [
-        "session_index.jsonl",
-        "history.jsonl",
-        "thread_history_1.sqlite",
-        "thread_history_1.sqlite-shm",
-        "thread_history_1.sqlite-wal",
-        "state_5.sqlite",
-        "state_5.sqlite-shm",
-        "state_5.sqlite-wal",
-        "logs_2.sqlite",
-        "logs_2.sqlite-shm",
-        "logs_2.sqlite-wal",
-    ]
-    for db in db_files:
-        src = os.path.normpath(os.path.join(base, db))
-        dst = os.path.normpath(os.path.join(acct_dir, db))
-        if os.path.exists(src) and not os.path.exists(dst):
-            try:
-                os.link(src, dst)
-            except Exception:
+    # 3. Session history indexes (copy only, never hard link)
+    for idx_file in ["session_index.jsonl", "history.jsonl"]:
+        dst = os.path.normpath(os.path.join(acct_dir, idx_file))
+        if not os.path.exists(dst):
+            src_acct = os.path.normpath(os.path.join(base, "accounts", email.lower(), idx_file))
+            src_base = os.path.normpath(os.path.join(base, idx_file))
+            if os.path.exists(src_acct):
                 try:
-                    shutil.copy2(src, dst)
+                    shutil.copy2(src_acct, dst)
+                except Exception:
+                    pass
+            elif os.path.exists(src_base):
+                try:
+                    shutil.copy2(src_base, dst)
                 except Exception:
                     pass
 
@@ -200,7 +195,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if len(sys.argv) >= 3 and sys.argv[1] == "--setup-home":
-        print(setup_account_home(sys.argv[2]))
+        ws = sys.argv[3] if len(sys.argv) >= 4 else None
+        print(setup_account_home(sys.argv[2], ws))
         sys.exit(0)
 
     if len(sys.argv) < 3:

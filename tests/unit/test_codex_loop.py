@@ -166,4 +166,20 @@ def test_setup_account_home():
             shutil.rmtree(home_path, ignore_errors=True)
 
 
+def test_setup_account_home_with_workspace():
+    from scripts.log_checker import setup_account_home
+    import shutil
+
+    test_email = "unit_test_account@example.com"
+    home_path = setup_account_home(test_email, "C:/projects/my_test_workspace")
+    try:
+        assert os.path.exists(home_path)
+        assert os.path.isdir(home_path)
+        assert "my_test_workspace" in home_path.lower()
+    finally:
+        if os.path.exists(home_path):
+            shutil.rmtree(home_path, ignore_errors=True)
+
+
+
 
