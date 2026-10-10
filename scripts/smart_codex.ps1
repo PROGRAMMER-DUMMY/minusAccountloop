@@ -14,6 +14,7 @@ if (-not (Test-Path $codexExe)) {
 }
 
 $codexHome = "$env:USERPROFILE\.codex"
+$env:CODEX_HOME = $codexHome
 $authPath = "$codexHome\auth.json"
 $profilesDir = "$codexHome\profiles"
 $mappingFile = "$codexHome\workspace_accounts.json"
@@ -434,6 +435,7 @@ if ($CodexArgs -contains '--add-account' -or $CodexArgs -contains '--login-accou
     Write-Host "When browser opens, click 'Continue with Google' and pick the account you want to register.`n" -ForegroundColor Yellow
 
     Sync-ActiveAuthToProfile
+    $env:CODEX_HOME = $codexHome
     try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
     & $codexExe login
     
@@ -608,6 +610,7 @@ if ($isRevoked -or $inCooldown) {
 
     $choice = Read-Host "Would you like to log in now? (Y/n)"
     if ($choice -eq '' -or $choice -match '^[Yy]') {
+        $env:CODEX_HOME = $codexHome
         try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
         & $codexExe login
         $newEmail = Get-EmailFromAuthFile $authPath
