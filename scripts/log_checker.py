@@ -74,7 +74,7 @@ def check_auth_token(auth_path: str) -> str:
             "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
             headers={"Authorization": f"Bearer {token}", "User-Agent": "codex-cli"},
         )
-        with urllib.request.urlopen(req, timeout=2) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             if resp.status == 200:
                 return "VALID"
     except urllib.error.HTTPError as e:
