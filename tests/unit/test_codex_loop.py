@@ -181,5 +181,18 @@ def test_setup_account_home_with_workspace():
             shutil.rmtree(home_path, ignore_errors=True)
 
 
+def test_get_full_pool_status():
+    from scripts.log_checker import get_full_pool_status
+
+    status_list = get_full_pool_status()
+    assert isinstance(status_list, list)
+    if status_list:
+        first = status_list[0]
+        assert "email" in first
+        assert "token_health" in first
+        assert "quota_5h_used" in first
+        assert "quota_weekly_used" in first
+
+
 
 

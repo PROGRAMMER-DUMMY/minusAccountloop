@@ -189,7 +189,139 @@ def setup_account_home(email: str, workspace_dir: str | None = None) -> str:
     return acct_dir
 
 
+def get_full_pool_status() -> list[dict]:
+    """Retrieves live authentication status, session locks, workspace mappings, and 5h/weekly quota for all accounts."""
+    import glob
+    import json
+    import re
+    import time
+
+    base = os.path.normpath(os.path.expanduser("~/.codex"))
+    profiles_dir = os.path.join(base, "profiles")
+    mapping_file = os.path.join(base, "workspace_accounts.json")
+    sessions_dir = os.path.join(base, "active_sessions")
+
+    ws_mappings = {}
+    if os.path.exists(mapping_file):
+        try:
+            with open(mapping_file, "r", encoding="utf-8") as f:
+                ws_mappings = json.load(f)
+        except Exception:
+            pass
+
+    email_to_ws = {}
+    for ws_path, acct in ws_mappings.items():
+        em = acct.lower().strip()
+        email_to_ws.setdefault(em, []).append(os.path.basename(ws_path))
+
+    active_locks = {}
+    if os.path.exists(sessions_dir):
+        for f in glob.glob(os.path.join(sessions_dir, "*.lock")):
+            try:
+                with open(f, "r", encoding="utf-8") as lf:
+                    data = json.load(lf)
+                pid = int(data.get("pid", 0))
+                em = os.path.basename(f).split("_")[0].lower()
+                active_locks[em] = pid
+            except Exception:
+                pass
+
+    now = int(time.time())
+    results = []
+
+    profile_files = sorted(glob.glob(os.path.join(profiles_dir, "*.json")))
+    for ppath in profile_files:
+        email = os.path.basename(ppath).replace(".json", "").lower()
+        token_health = check_auth_token(ppath)
+        pid = active_locks.get(email, 0)
+
+        ws_list = email_to_ws.get(email, [])
+        db_candidates = [
+            os.path.join(base, "accounts", email, "logs_2.sqlite")
+        ] + [
+            os.path.join(base, "workspaces", ws, "logs_2.sqlite")
+            for ws in ws_list
+        ]
+
+        best_row = None
+        for db in db_candidates:
+            if not os.path.exists(db):
+                continue
+            try:
+                conn = sqlite3.connect(db)
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT ts, feedback_log_body 
+                    FROM logs 
+                    WHERE feedback_log_body LIKE '%headers=%' 
+                      AND feedback_log_body LIKE '%x-codex-primary-used-percent%'
+                    ORDER BY ts DESC 
+                    LIMIT 1
+                    """
+                )
+                r = cur.fetchone()
+                if r and (not best_row or r[0] > best_row[0]):
+                    best_row = r
+                conn.close()
+            except Exception:
+                pass
+
+        p_used = "0%"
+        p_reset = "Ready"
+        s_used = "0%"
+        s_reset = "Full"
+
+        if best_row:
+            m = re.search(r"headers=(\{.*?\}) version=", best_row[1])
+            if m:
+                try:
+                    hdrs = json.loads(m.group(1))
+                    raw_p = int(hdrs.get("x-codex-primary-used-percent", "0"))
+                    raw_s = int(hdrs.get("x-codex-secondary-used-percent", "0"))
+                    p_reset_at = int(hdrs.get("x-codex-primary-reset-at", "0"))
+                    s_reset_at = int(hdrs.get("x-codex-secondary-reset-at", "0"))
+
+                    if p_reset_at > 0 and now < p_reset_at:
+                        p_used = f"{raw_p}%"
+                        rem_m = max(1, (p_reset_at - now) // 60)
+                        p_reset = f"in {rem_m}m"
+                    else:
+                        p_used = "0%"
+                        p_reset = "Ready"
+
+                    if s_reset_at > 0 and now < s_reset_at:
+                        s_used = f"{raw_s}%"
+                        rem_h = max(1, (s_reset_at - now) // 3600)
+                        s_reset = f"in {rem_h}h"
+                    else:
+                        s_used = "0%"
+                        s_reset = "Full"
+                except Exception:
+                    pass
+
+        results.append(
+            {
+                "email": email,
+                "token_health": token_health,
+                "pid": pid,
+                "workspaces": ws_list,
+                "quota_5h_used": p_used,
+                "quota_5h_reset": p_reset,
+                "quota_weekly_used": s_used,
+                "quota_weekly_reset": s_reset,
+            }
+        )
+
+    return results
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--pool-status-json":
+        import json
+        print(json.dumps(get_full_pool_status()))
+        sys.exit(0)
+
     if len(sys.argv) >= 3 and sys.argv[1] == "--check-token":
         print(check_auth_token(sys.argv[2]))
         sys.exit(0)

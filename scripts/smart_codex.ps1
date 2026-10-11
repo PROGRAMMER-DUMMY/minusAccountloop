@@ -355,42 +355,149 @@ if ($useIdx -ge 0 -and $useIdx -lt ($CodexArgs.Count - 1)) {
     exit 0
 }
 
-# --- CLI COMMAND: --status / -s ---
-if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s') {
-    Write-Host "`n[MinusAccountLoop] Codex Multi-Account Pool Status" -ForegroundColor Cyan
-    Write-Host "=================================================" -ForegroundColor DarkGray
-    $activeNow = Get-EmailFromAuthFile $authPath
-    Write-Host "Active Account: " -NoNewline
-    if ($activeNow) { Write-Host "$activeNow" -ForegroundColor Green } else { Write-Host "None (Not logged in)" -ForegroundColor Red }
+# --- CLI COMMAND: --status / -s / --select / --switch ---
+if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s' -or $CodexArgs -contains '--select' -or $CodexArgs -contains '--switch') {
+    Write-Host "`n[MinusAccountLoop] Codex Multi-Account Pool & Live Quota Radar" -ForegroundColor Cyan
+    Write-Host "==========================================================================================" -ForegroundColor DarkGray
+    
+    $currWsPath = $PWD.Path.TrimEnd('\/').ToLower()
+    $currWsName = Split-Path -Leaf $PWD.Path
+    $currentBound = if ($mappings.ContainsKey($currWsPath)) { $mappings[$currWsPath] } else { "None" }
+    $activeAuth = Get-EmailFromAuthFile $authPath
+    
+    Write-Host "Current Workspace: " -NoNewline
+    Write-Host "$currWsName ($($PWD.Path))" -ForegroundColor Yellow
+    Write-Host "Bound Account    : " -NoNewline
+    if ($currentBound -ne "None") { Write-Host "$currentBound" -ForegroundColor Green } else { Write-Host "None (Auto-assigned on start)" -ForegroundColor DarkGray }
+    Write-Host "Active Auth File : " -NoNewline
+    if ($activeAuth) { Write-Host "$activeAuth" -ForegroundColor Green } else { Write-Host "None" -ForegroundColor Red }
     Write-Host ""
 
-    $poolRows = @()
-    foreach ($p in $availableProfiles) {
-        $activePid = Get-ActiveSessionPid $p
-        $status = "READY"
-        if ($activePid -gt 0) {
-            $status = "IN USE (PID $activePid)"
-        } elseif (Is-AccountRevoked $p) {
-            $status = "REVOKED (codex --login-account)"
-        } else {
-            $rem = Get-CooldownRemainingMin $p
-            if ($rem -gt 0) {
-                $status = "COOLDOWN (~$rem min)"
+    # Fetch live pool data and quotas via python log_checker
+    $poolData = @()
+    if (Test-Path $logCheckerPy) {
+        try {
+            $rawJson = python $logCheckerPy --pool-status-json 2>$null
+            if ($rawJson) {
+                $poolData = $rawJson | ConvertFrom-Json
             }
+        } catch {}
+    }
+
+    $poolRows = @()
+    $idx = 1
+    foreach ($item in $poolData) {
+        $em = $item.email
+        $isBound = ($em.ToLower() -eq $currentBound.ToLower())
+        $isActive = ($em.ToLower() -eq $activeAuth.ToLower())
+        
+        $marker = ""
+        if ($isBound -and $isActive) {
+            $marker = ">> BOUND+ACTIVE <<"
+        } elseif ($isBound) {
+            $marker = ">> BOUND <<"
+        } elseif ($isActive) {
+            $marker = "(Active)"
         }
-        $sw = 0
-        if ($poolState.ContainsKey($p.ToLower())) {
-            $sw = $poolState[$p.ToLower()].switchCount
+
+        $tokenStatus = if ($item.token_health -eq "VALID") { "VALID (200)" } elseif ($item.token_health -eq "REVOKED") { "EXPIRED (401)" } else { $item.token_health }
+        
+        $sessionStatus = "READY"
+        if ($item.pid -gt 0) {
+            $sessionStatus = "IN USE (PID $($item.pid))"
+        } elseif ($item.token_health -eq "REVOKED") {
+            $sessionStatus = "LOGIN REQUIRED"
         }
-        $isActive = ($p.ToLower() -eq $activeNow.ToLower())
+
+        $quota5h = "$($item.quota_5h_used) ($($item.quota_5h_reset))"
+        $quotaWk = "$($item.quota_weekly_used) ($($item.quota_weekly_reset))"
+
+        $wsAssigned = ($item.workspaces -join ", ")
+        if (-not $wsAssigned) { $wsAssigned = "-" }
+
         $poolRows += [PSCustomObject]@{
-            Active = if ($isActive) { ">> ACTIVE <<" } else { "" }
-            Email = $p
-            PoolStatus = $status
-            Switches = $sw
+            "#"          = "[$idx]"
+            "Status"     = $marker
+            "Email"      = $em
+            "Token"      = $tokenStatus
+            "Session"    = $sessionStatus
+            "5h Quota"   = $quota5h
+            "Weekly"     = $quotaWk
+            "Workspaces" = $wsAssigned
+        }
+        $idx++
+    }
+
+    $poolRows | Format-Table -AutoSize
+
+    # Interactive selector prompt
+    $shouldPrompt = $false
+    if ($CodexArgs -contains '--select' -or $CodexArgs -contains '--switch') {
+        $shouldPrompt = $true
+    } else {
+        try {
+            if (-not [Console]::IsInputRedirected) { $shouldPrompt = $true }
+        } catch {
+            $shouldPrompt = $false
         }
     }
-    $poolRows | Format-Table -AutoSize
+
+    if ($shouldPrompt -and $poolData.Count -gt 0) {
+        Write-Host "[Interactive Selector] Switch account for '$currWsName':" -ForegroundColor Cyan
+        Write-Host "  Enter [1-$($poolData.Count)] to bind and activate account" -ForegroundColor DarkGray
+        Write-Host "  Enter [L] to log into / onboard a new account" -ForegroundColor DarkGray
+        Write-Host "  Press [Enter] to keep current selection`n" -ForegroundColor DarkGray
+
+        $choice = Read-Host "Select account [1-$($poolData.Count), L, Enter]"
+        $choice = $choice.Trim()
+
+        if ($choice -match '^[0-9]+$') {
+            $num = [int]$choice
+            if ($num -ge 1 -and $num -le $poolData.Count) {
+                $chosen = $poolData[$num - 1]
+                $chosenEmail = $chosen.email
+
+                # Bind workspace
+                $mappings[$currWsPath] = $chosenEmail
+                Save-Mappings
+                Switch-ActiveAccount $chosenEmail | Out-Null
+
+                # Setup isolated home for workspace
+                python $logCheckerPy --setup-home $chosenEmail $PWD.Path 2>$null | Out-Null
+
+                Write-Host "`n[MinusAccountLoop] [Activated] Workspace '$currWsName' is now bound to: $chosenEmail" -ForegroundColor Green
+
+                if ($chosen.token_health -eq "REVOKED") {
+                    Write-Host "[MinusAccountLoop] [!] '$chosenEmail' token is expired (401). Launching login to refresh..." -ForegroundColor Yellow
+                    $env:CODEX_HOME = $codexHome
+                    try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
+                    & $codexExe login
+                    Sync-ActiveAuthToProfile
+                    python $logCheckerPy --setup-home $chosenEmail $PWD.Path 2>$null | Out-Null
+                    Write-Host "[MinusAccountLoop] [Refreshed] '$chosenEmail' authenticated successfully." -ForegroundColor Green
+                }
+            } else {
+                Write-Host "[MinusAccountLoop] Selection out of range. Keeping current binding." -ForegroundColor DarkGray
+            }
+        } elseif ($choice -match '^[Ll]$') {
+            Write-Host "`n[MinusAccountLoop] Launching login wizard..." -ForegroundColor Cyan
+            $env:CODEX_HOME = $codexHome
+            try { & $codexExe app-server daemon stop 2>&1 | Out-Null } catch {}
+            & $codexExe login
+            $newEmail = Get-EmailFromAuthFile $authPath
+            if ($newEmail) {
+                $dest = Join-Path $profilesDir "$newEmail.json"
+                Copy-Item $authPath $dest -Force
+                $mappings[$currWsPath] = $newEmail
+                Save-Mappings
+                python $logCheckerPy --setup-home $newEmail $PWD.Path 2>$null | Out-Null
+                Write-Host "`n[MinusAccountLoop] Successfully logged in and bound '$currWsName' to: $newEmail" -ForegroundColor Green
+            }
+        } else {
+            Write-Host "[MinusAccountLoop] Kept current binding." -ForegroundColor DarkGray
+        }
+    }
+
     exit 0
 }
 
@@ -507,6 +614,11 @@ if ($finalArgs -notcontains '--no-daemon') {
 
 if ($finalArgs -notcontains '-s' -and $finalArgs -notcontains '--sandbox') {
     $finalArgs += @('-s', 'danger-full-access')
+}
+
+# Auto-inject -p auto if profile omitted (makes 'codex -c' execute like 'codex -p auto -c')
+if ($finalArgs -notcontains '-p' -and $finalArgs -notcontains '--profile') {
+    $finalArgs += @('-p', 'auto')
 }
 
 if ($mappings.ContainsKey($currentDir)) {
