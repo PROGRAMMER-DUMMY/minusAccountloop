@@ -316,6 +316,50 @@ def get_full_pool_status() -> list[dict]:
     return results
 
 
+def has_prior_session(workspace_dir: str) -> bool:
+    """Checks whether an unarchived session exists for the given workspace directory."""
+    if not workspace_dir:
+        return False
+    base = os.path.normpath(os.path.expanduser("~/.codex"))
+    norm_ws = os.path.normcase(os.path.normpath(workspace_dir))
+    ws_name = os.path.basename(norm_ws)
+
+    # 1. Check isolated workspace session index
+    ws_idx = os.path.join(base, "workspaces", ws_name, "session_index.jsonl")
+    if os.path.exists(ws_idx):
+        try:
+            with open(ws_idx, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        return True
+        except Exception:
+            pass
+
+    # 2. Check state_5.sqlite databases
+    db_candidates = [
+        os.path.join(base, "state_5.sqlite"),
+        os.path.join(base, "workspaces", ws_name, "state_5.sqlite"),
+    ]
+    for db in db_candidates:
+        if not os.path.exists(db):
+            continue
+        try:
+            conn = sqlite3.connect(db)
+            cur = conn.cursor()
+            cur.execute("SELECT cwd FROM threads WHERE archived = 0")
+            for r in cur.fetchall():
+                if r and r[0]:
+                    clean = os.path.normcase(os.path.normpath(r[0].replace("\\\\?\\", "").replace("//?/", "")))
+                    if clean == norm_ws:
+                        conn.close()
+                        return True
+            conn.close()
+        except Exception:
+            pass
+
+    return False
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "--pool-status-json":
         import json
@@ -324,6 +368,10 @@ if __name__ == "__main__":
 
     if len(sys.argv) >= 3 and sys.argv[1] == "--check-token":
         print(check_auth_token(sys.argv[2]))
+        sys.exit(0)
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "--has-session":
+        print("1" if has_prior_session(sys.argv[2]) else "0")
         sys.exit(0)
 
     if len(sys.argv) >= 3 and sys.argv[1] == "--setup-home":
@@ -339,5 +387,6 @@ if __name__ == "__main__":
     outcomes = check_logs(db, ts)
     for outcome in outcomes:
         print(outcome)
+
 
 

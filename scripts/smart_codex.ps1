@@ -194,6 +194,59 @@ if (Test-Path $profilesDir) {
     $availableProfiles = (Get-ChildItem $profilesDir -Filter "*.json" | Where-Object { $_.BaseName -match '@' }).BaseName
 }
 
+function Sync-PoolStateFromRadar {
+    if (-not (Test-Path $logCheckerPy)) { return }
+    try {
+        $raw = python $logCheckerPy --pool-status-json 2>$null
+        if ($raw) {
+            $items = $raw | ConvertFrom-Json
+            $stateChanged = $false
+            foreach ($it in $items) {
+                $em = $it.email.ToLower()
+                if (-not $poolState.ContainsKey($em)) {
+                    $poolState[$em] = @{ lastExhausted = 0; switchCount = 0; cooldownUntil = 0; authRevoked = $false }
+                }
+
+                # Check revocation
+                if ($it.token_health -eq "REVOKED") {
+                    if (-not $poolState[$em].authRevoked) {
+                        $poolState[$em].authRevoked = $true
+                        $stateChanged = $true
+                    }
+                } elseif ($it.token_health -eq "VALID") {
+                    if ($poolState[$em].authRevoked) {
+                        $poolState[$em].authRevoked = $false
+                        $stateChanged = $true
+                    }
+                }
+
+                # Check 5h 100% exhaustion
+                if ($it.quota_5h_used -eq "100%") {
+                    $resetMin = 180
+                    if ($it.quota_5h_reset -match 'in\s+(\d+)m') {
+                        $resetMin = [int]$Matches[1]
+                    }
+                    $cdUntil = $nowMs + ($resetMin * 60 * 1000)
+                    if ($poolState[$em].cooldownUntil -lt $cdUntil) {
+                        $poolState[$em].cooldownUntil = $cdUntil
+                        $poolState[$em].lastExhausted = $nowMs
+                        $stateChanged = $true
+                    }
+                } elseif ($it.quota_5h_used -eq "0%" -and $it.token_health -eq "VALID") {
+                    if ($poolState[$em].cooldownUntil -gt 0) {
+                        $poolState[$em].cooldownUntil = 0
+                        $stateChanged = $true
+                    }
+                }
+            }
+            if ($stateChanged) {
+                Save-PoolState
+            }
+        }
+    } catch {}
+}
+Sync-PoolStateFromRadar
+
 function Is-AccountInCooldown($email) {
     if (-not $email) { return $false }
     $k = $email.ToLower()
@@ -575,10 +628,26 @@ if ($CodexArgs -contains '--add-account' -or $CodexArgs -contains '--login-accou
 $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
 $targetAccount = $null
 
-# Parse and normalize arguments (translate -c or --continue to resume --last)
+# Parse and normalize arguments:
+# Auto-resume is enabled by default unless:
+# 1. User passes --new or -n to explicitly start a fresh session
+# 2. User invokes a known native subcommand (e.g. login, logout, doctor, status, exec, review, etc.)
+# 3. User passes help / version flags (-h, --help, -V, --version)
+$isNew = $false
 $isContinue = $false
-$finalArgs = @()
+$filteredArgs = @()
 $skipNext = $false
+
+$knownSubcommands = @(
+    'agents', 'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin',
+    'app-server', 'remote-control', 'app', 'completion', 'update', 'doctor',
+    'sandbox', 'debug', 'apply', 'resume', 'queue', 'archive', 'delete',
+    'migrate-rollouts', 'unarchive', 'fork', 'cloud', 'exec-server', 'features', 'help'
+)
+
+$helpOrVersionFlags = @('-h', '--help', '-V', '--version')
+$isSubcommand = $false
+$isHelpOrVersion = $false
 
 for ($idx = 0; $idx -lt $CodexArgs.Count; $idx++) {
     if ($skipNext) {
@@ -586,6 +655,10 @@ for ($idx = 0; $idx -lt $CodexArgs.Count; $idx++) {
         continue
     }
     $curr = $CodexArgs[$idx]
+    if ($curr -eq '--new' -or $curr -eq '-n') {
+        $isNew = $true
+        continue
+    }
     if ($curr -eq '--continue') {
         $isContinue = $true
         continue
@@ -595,30 +668,61 @@ for ($idx = 0; $idx -lt $CodexArgs.Count; $idx++) {
             $isContinue = $true
             continue
         } else {
-            $finalArgs += $curr
-            $finalArgs += $next
+            $filteredArgs += $curr
+            $filteredArgs += $next
             $skipNext = $true
             continue
         }
     }
-    $finalArgs += $curr
+
+    if ($idx -eq 0 -and $knownSubcommands -contains $curr.ToLower()) {
+        $isSubcommand = $true
+    }
+
+    if ($helpOrVersionFlags -contains $curr) {
+        $isHelpOrVersion = $true
+    }
+
+    $filteredArgs += $curr
 }
 
-if ($isContinue -and ($finalArgs -notcontains 'resume')) {
-    $finalArgs = @('resume', '--last') + $finalArgs
+$shouldResume = $false
+if ($isContinue) {
+    $shouldResume = $true
+} elseif (-not $isNew -and -not $isSubcommand -and -not $isHelpOrVersion) {
+    if (Test-Path $logCheckerPy) {
+        try {
+            $hasSession = python $logCheckerPy --has-session "$PWD" 2>$null
+            if ($hasSession -and $hasSession.Trim() -eq "1") {
+                $shouldResume = $true
+            }
+        } catch {}
+    }
 }
 
-if ($finalArgs -notcontains '--no-daemon') {
-    $finalArgs += '--no-daemon'
+$finalArgs = @()
+if ($shouldResume) {
+    if ($filteredArgs -notcontains 'resume') {
+        $finalArgs = @('resume', '--last') + $filteredArgs
+    } else {
+        $finalArgs = $filteredArgs
+    }
+} else {
+    $finalArgs = $filteredArgs
 }
 
-if ($finalArgs -notcontains '-s' -and $finalArgs -notcontains '--sandbox') {
-    $finalArgs += @('-s', 'danger-full-access')
-}
+if (-not $isSubcommand -and -not $isHelpOrVersion) {
+    if ($finalArgs -notcontains '--no-daemon') {
+        $finalArgs += '--no-daemon'
+    }
 
-# Auto-inject -p auto if profile omitted (makes 'codex -c' execute like 'codex -p auto -c')
-if ($finalArgs -notcontains '-p' -and $finalArgs -notcontains '--profile') {
-    $finalArgs += @('-p', 'auto')
+    if ($finalArgs -notcontains '-s' -and $finalArgs -notcontains '--sandbox') {
+        $finalArgs += @('-s', 'danger-full-access')
+    }
+
+    if ($finalArgs -notcontains '-p' -and $finalArgs -notcontains '--profile') {
+        $finalArgs += @('-p', 'auto')
+    }
 }
 
 if ($mappings.ContainsKey($currentDir)) {
@@ -631,6 +735,8 @@ if ($mappings.ContainsKey($currentDir)) {
                 Write-Host "`n[MinusAccountLoop] [Active Session] $mapped is running in another terminal." -ForegroundColor Cyan
                 Write-Host "[MinusAccountLoop] [Auto-Switch] Automatically assigned idle account: $targetAccount" -ForegroundColor Green
             } else {
+                Write-Host "`n[MinusAccountLoop] [Auto-Switch] Mapped account '$mapped' is unavailable/exhausted." -ForegroundColor Yellow
+                Write-Host "[MinusAccountLoop] [Auto-Switch] Automatically switched workspace to idle account: $targetAccount" -ForegroundColor Green
                 $mappings[$currentDir] = $targetAccount
                 Save-Mappings
             }
@@ -640,8 +746,8 @@ if ($mappings.ContainsKey($currentDir)) {
     }
 } else {
     $assignedEmails = $mappings.Values
-    $unassigned = $availableProfiles | Where-Object { $assignedEmails -notcontains $_ -and -not (Is-AccountRevoked $_) -and -not (Is-AccountInCooldown $_) -and -not (Is-AccountInActiveSession $_) }
-    if ($unassigned -and $unassigned.Count -gt 0) {
+    $unassigned = @($availableProfiles | Where-Object { $assignedEmails -notcontains $_ -and -not (Is-AccountRevoked $_) -and -not (Is-AccountInCooldown $_) -and -not (Is-AccountInActiveSession $_) })
+    if ($unassigned.Count -gt 0) {
         $targetAccount = $unassigned[0]
     } else {
         $curActive = Get-EmailFromAuthFile $authPath
@@ -656,6 +762,11 @@ if ($mappings.ContainsKey($currentDir)) {
         Save-Mappings
     }
 }
+
+if ($shouldResume -and $targetAccount) {
+    Write-Host "`n[MinusAccountLoop] [Auto-Resume] Resuming session on $targetAccount (Auto-Approved) ...`n" -ForegroundColor Green
+}
+
 
 # Pre-swap active auth if needed
 if ($targetAccount) {
@@ -686,6 +797,8 @@ if ($targetAccount) {
             if ($alt -and $alt.ToLower() -ne $targetAccount.ToLower()) {
                 $targetAccount = $alt
                 Switch-ActiveAccount $targetAccount | Out-Null
+                $mappings[$currentDir] = $targetAccount
+                Save-Mappings
             }
         } elseif ($tCheck -eq "EXHAUSTED") {
             $kAcc = $targetAccount.ToLower()
@@ -701,6 +814,8 @@ if ($targetAccount) {
             if ($alt -and $alt.ToLower() -ne $targetAccount.ToLower()) {
                 $targetAccount = $alt
                 Switch-ActiveAccount $targetAccount | Out-Null
+                $mappings[$currentDir] = $targetAccount
+                Save-Mappings
             }
         }
     }

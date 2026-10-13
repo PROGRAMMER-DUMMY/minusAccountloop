@@ -194,5 +194,18 @@ def test_get_full_pool_status():
         assert "quota_weekly_used" in first
 
 
+def test_has_prior_session():
+    from scripts.log_checker import has_prior_session
+
+    # Non-existent dummy directory should return False
+    dummy_dir = os.path.join(tempfile.gettempdir(), "dummy_minus_nonexistent_workspace_12345")
+    assert has_prior_session(dummy_dir) is False
+
+    # Current repository directory has prior recorded threads
+    current_repo = str(REPO_ROOT)
+    assert has_prior_session(current_repo) is True
+
+
+
 
 
