@@ -400,12 +400,20 @@ if ($useIdx -ge 0 -and $useIdx -lt ($CodexArgs.Count - 1)) {
         $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
         $mappings[$currentDir] = $targetEmail
         Save-Mappings
+        python $logCheckerPy --setup-home $targetEmail $PWD.Path 2>$null | Out-Null
         Write-Host "`n[MinusAccountLoop] Explicitly set active account to: $targetEmail" -ForegroundColor Green
         Write-Host "[MinusAccountLoop] Workspace '$($PWD.Path)' is now bound to: $targetEmail" -ForegroundColor Cyan
+        Write-Host "[MinusAccountLoop] Auto-loading Codex on '$targetEmail' ...`n" -ForegroundColor Cyan
+        $newArgs = @()
+        for ($u = 0; $u -lt $CodexArgs.Count; $u++) {
+            if ($u -eq $useIdx -or $u -eq ($useIdx + 1)) { continue }
+            $newArgs += $CodexArgs[$u]
+        }
+        $CodexArgs = $newArgs
     } else {
         Write-Host "`n[MinusAccountLoop] [!] Profile not found for: $targetEmail" -ForegroundColor Red
+        exit 1
     }
-    exit 0
 }
 
 # --- CLI COMMAND: --status / -s / --select / --switch ---
@@ -497,9 +505,9 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s' -or $CodexArgs
 
     if ($shouldPrompt -and $poolData.Count -gt 0) {
         Write-Host "[Interactive Selector] Switch account for '$currWsName':" -ForegroundColor Cyan
-        Write-Host "  Enter [1-$($poolData.Count)] to bind and activate account" -ForegroundColor DarkGray
-        Write-Host "  Enter [L] to log into / onboard a new account" -ForegroundColor DarkGray
-        Write-Host "  Press [Enter] to keep current selection`n" -ForegroundColor DarkGray
+        Write-Host "  Enter [1-$($poolData.Count)] to switch account and auto-launch Codex" -ForegroundColor DarkGray
+        Write-Host "  Enter [L] to log into a new account and auto-launch Codex" -ForegroundColor DarkGray
+        Write-Host "  Press [Enter] to keep current selection and exit`n" -ForegroundColor DarkGray
 
         $choice = Read-Host "Select account [1-$($poolData.Count), L, Enter]"
         $choice = $choice.Trim()
@@ -529,8 +537,12 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s' -or $CodexArgs
                     python $logCheckerPy --setup-home $chosenEmail $PWD.Path 2>$null | Out-Null
                     Write-Host "[MinusAccountLoop] [Refreshed] '$chosenEmail' authenticated successfully." -ForegroundColor Green
                 }
+
+                Write-Host "[MinusAccountLoop] Auto-loading Codex on '$chosenEmail' ...`n" -ForegroundColor Cyan
+                $CodexArgs = @()
             } else {
                 Write-Host "[MinusAccountLoop] Selection out of range. Keeping current binding." -ForegroundColor DarkGray
+                exit 0
             }
         } elseif ($choice -match '^[Ll]$') {
             Write-Host "`n[MinusAccountLoop] Launching login wizard..." -ForegroundColor Cyan
@@ -545,13 +557,18 @@ if ($CodexArgs -contains '--status' -or $CodexArgs -contains '-s' -or $CodexArgs
                 Save-Mappings
                 python $logCheckerPy --setup-home $newEmail $PWD.Path 2>$null | Out-Null
                 Write-Host "`n[MinusAccountLoop] Successfully logged in and bound '$currWsName' to: $newEmail" -ForegroundColor Green
+                Write-Host "[MinusAccountLoop] Auto-loading Codex on '$newEmail' ...`n" -ForegroundColor Cyan
+                $CodexArgs = @()
+            } else {
+                exit 0
             }
         } else {
             Write-Host "[MinusAccountLoop] Kept current binding." -ForegroundColor DarkGray
+            exit 0
         }
+    } else {
+        exit 0
     }
-
-    exit 0
 }
 
 # --- CLI COMMAND: --rotate / -r ---
@@ -563,12 +580,15 @@ if ($CodexArgs -contains '--rotate' -or $CodexArgs -contains '-r') {
         $currentDir = $PWD.Path.TrimEnd('\/').ToLower()
         $mappings[$currentDir] = $next
         Save-Mappings
+        python $logCheckerPy --setup-home $next $PWD.Path 2>$null | Out-Null
         Write-Host "[MinusAccountLoop] Rotated Codex active account to: $next" -ForegroundColor Green
         Write-Host "[MinusAccountLoop] Workspace '$($PWD.Path)' is now bound to: $next" -ForegroundColor Cyan
+        Write-Host "[MinusAccountLoop] Auto-loading Codex on '$next' ...`n" -ForegroundColor Cyan
+        $CodexArgs = @($CodexArgs | Where-Object { $_ -ne '--rotate' -and $_ -ne '-r' })
     } else {
         Write-Host "[MinusAccountLoop] No alternate ready account found in pool." -ForegroundColor Yellow
+        exit 0
     }
-    exit 0
 }
 
 # --- CLI COMMAND: --add-account / --login-account ---
